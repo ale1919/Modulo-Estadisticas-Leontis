@@ -1,0 +1,9 @@
+{
+    "Local": {
+        "db_type": "SQL Server",
+        "host": ".\\SQLEXPRESS",
+        "port": "",
+        "user": "",
+        "win_auth": true
+    }
+}

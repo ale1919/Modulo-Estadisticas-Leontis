@@ -1,0 +1,15 @@
+{
+    "seleccion": [
+        "analysis_layer.py",
+        "analyzer_last_server.json",
+        "analyzer_servers.json",
+        "data_layer.py",
+        "db_utils.py",
+        "main.py",
+        "plot_utils.py",
+        "ui_connection_dialog.py",
+        "ui_main_window.py",
+        "ui_styles.py"
+    ],
+    "last_path": "C:/Users/alema/OneDrive/Escritorio"
+}
