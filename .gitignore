@@ -1,0 +1,29 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+venv_*/
+.env
+.idea/
+.vscode/
+build/
+
+# dist/ SÍ se ignora en esta app, a diferencia de MINIhub y AgendaRust.
+# El build onedir arrastra PySide6 + matplotlib + pandas: son ~400 MB y varios
+# archivos sueltos superan los 100 MB, que es el límite duro por archivo de
+# GitHub. El build se regenera con `python -m PyInstaller ModuloEstadisticasLeontis.spec`
+# y lo que se reparte sale del FTP vía MINIhub, así que no es fuente de nada.
+dist/
+
+# Actualizador: staging, descartes y salida de --simular
+.actualizacion/
+*.viejo-*
+version.json.simulado*
+catalogo.json.simulado
+**/Config/instalado.json
+
+# Comprimidos sueltos que no son fuente de nada
+*.rar
+*.zip

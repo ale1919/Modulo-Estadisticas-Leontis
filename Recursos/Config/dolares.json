@@ -1,0 +1,36 @@
+{
+  "fuente": "DolarAPI",
+  "descripcion": "Valores de distintos tipos de dólares en Argentina",
+  "endpoints": {
+    "oficial": {
+      "url": "https://dolarapi.com/v1/dolares/oficial",
+      "metodo": "GET",
+      "tipo_respuesta": "json"
+    },
+    "blue": {
+      "url": "https://dolarapi.com/v1/dolares/blue",
+      "metodo": "GET",
+      "tipo_respuesta": "json"
+    },
+    "bolsa": {
+      "url": "https://dolarapi.com/v1/dolares/bolsa",
+      "metodo": "GET",
+      "tipo_respuesta": "json"
+    },
+    "contadoconliqui": {
+      "url": "https://dolarapi.com/v1/dolares/contadoconliqui",
+      "metodo": "GET",
+      "tipo_respuesta": "json"
+    },
+    "mayorista": {
+      "url": "https://dolarapi.com/v1/dolares/mayorista",
+      "metodo": "GET",
+      "tipo_respuesta": "json"
+    },
+    "tarjeta": {
+      "url": "https://dolarapi.com/v1/dolares/tarjeta",
+      "metodo": "GET",
+      "tipo_respuesta": "json"
+    }
+  }
+}

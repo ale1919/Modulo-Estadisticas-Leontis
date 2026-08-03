@@ -1,9 +1,0 @@
-{
-    "db_type": "SQL Server",
-    "host": ".\\SQLEXPRESS",
-    "port": "",
-    "database": "ARTBAMBOLA",
-    "user": "sa",
-    "password": "",
-    "use_win_auth": true
-}

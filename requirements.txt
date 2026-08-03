@@ -1,0 +1,8 @@
+PySide6
+pandas
+matplotlib
+SQLAlchemy
+PyMySQL
+requests
+XlsxWriter
+cryptography

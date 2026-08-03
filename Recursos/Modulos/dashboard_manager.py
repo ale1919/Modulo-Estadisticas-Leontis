@@ -1,0 +1,256 @@
+import requests
+import traceback
+import json
+from datetime import datetime, date
+from PySide6.QtCore import QObject, Signal, QThread, QSettings
+import os 
+import sys
+
+# --- INICIO DE CAMBIOS PARA COMPILACIÓN ---
+
+def resource_path(relative_path):
+    """
+    Obtiene la ruta absoluta a un recurso. Funciona para el modo de desarrollo
+    y para el ejecutable creado por PyInstaller.
+    """
+    try:
+        # PyInstaller crea una carpeta temporal y guarda la ruta en _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        # Si no está compilado, la base es la raíz del proyecto.
+        # Se sube dos niveles desde este archivo (.../Recursos/Modulos/ -> ../Recursos/ -> ./)
+        base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+
+    return os.path.join(base_path, relative_path)
+
+# Se usan rutas absolutas dinámicas para los archivos JSON que van dentro del .exe
+JSON_FILE_DOLAR = resource_path(os.path.join("Recursos", "Config", "dolares.json"))
+JSON_FILE_INFLACION = resource_path(os.path.join("Recursos", "Config", "inflacion.json"))
+
+# --- FIN DE CAMBIOS PARA COMPILACIÓN ---
+
+
+class ApiConnector:
+    """Clase aislada para manejar todas las llamadas de red externas."""
+    
+    def _parse_inflation_data(self, json_data, parser_type):
+        """
+        Intenta extraer y validar datos de inflación de diferentes formatos JSON.
+        Aplica la lógica de fallback de 3 meses, leyendo desde el inicio de la lista (datos más nuevos).
+        """
+        data_points = []
+        if parser_type == "datos_gob_ar":
+            data_points = json_data.get("data", [])
+        elif parser_type == "bcra":
+            data_points = json_data
+            
+        if not data_points:
+            return None, None
+
+        # Lógica de fallback: intentar con los 3 meses más recientes (posiciones 0, 1, 2)
+        for i in range(3):
+            if len(data_points) > i:
+                entry = data_points[i]
+                
+                fecha_str, valor = None, None
+                if parser_type == "datos_gob_ar" and len(entry) >= 2:
+                    fecha_str, valor = entry[0], entry[1]
+                elif parser_type == "bcra" and isinstance(entry, dict):
+                    fecha_str, valor = entry.get('d'), entry.get('v')
+
+                if fecha_str and valor is not None:
+                    try:
+                        fecha_dt = datetime.strptime(fecha_str, "%Y-%m-%d")
+                        meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+                        periodo_legible = f"{meses[fecha_dt.month - 1]} {fecha_dt.year}"
+                        if i > 0:
+                            print(f"INFO: Usando dato de inflación de un período anterior ({periodo_legible}).")
+                        return periodo_legible, float(valor)
+                    except (ValueError, TypeError):
+                        continue
+
+        return None, None
+
+    def fetch_inflation_with_fallback(self):
+        """
+        Itera sobre las fuentes de inflación del JSON y aplica la lógica de fallback.
+        """
+        try:
+            with open(JSON_FILE_INFLACION, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            print(f"ERROR: No se pudo leer o procesar {JSON_FILE_INFLACION}")
+            return None, None
+
+        for source in config.get("endpoints", []):
+            if not source.get("habilitado", False):
+                continue
+
+            nombre = source.get('nombre', 'Fuente desconocida')
+            url = source.get('url')
+            parser = source.get('parser')
+            headers = source.get('headers')
+
+            if not all([url, parser]):
+                continue
+
+            print(f"INFO: Consultando fuente de inflación: {nombre}...")
+            try:
+                response = requests.get(url, headers=headers, timeout=10)
+                if response.status_code == 200:
+                    periodo, valor = self._parse_inflation_data(response.json(), parser)
+                    if periodo and valor is not None:
+                        print(f"ÉXITO: Dato de inflación encontrado en {nombre}.")
+                        return periodo, valor
+                    else:
+                        print(f"AVISO: La fuente {nombre} respondió pero no se encontraron datos válidos.")
+                else:
+                    print(f"ERROR: La fuente {nombre} devolvió el código {response.status_code}.")
+            except requests.exceptions.RequestException as e:
+                print(f"ERROR: Falló la conexión con la fuente {nombre}. Causa: {e}")
+            except Exception as e:
+                 print(f"ERROR: Fallo inesperado al procesar la fuente {nombre}. Causa: {e}")
+
+
+        print("ERROR FATAL: Todas las fuentes de inflación fallaron.")
+        return None, None
+
+
+    def fetch_external_data(self):
+        """Intenta obtener Dólar e Inflación. Devuelve Nones si falla."""
+        print("API_FETCH: Iniciando búsqueda de datos económicos externos...")
+        results = {
+            "dolar_oficial": None, "dolar_blue": None, "dolar_mep": None,
+            "ipc_mes": None, "ipc_periodo": None
+        }
+
+        try:
+            with open(JSON_FILE_DOLAR, 'r', encoding='utf-8') as f:
+                dolar_config = json.load(f)
+            
+            url_oficial = dolar_config['endpoints']['oficial']['url']
+            response_oficial = requests.get(url_oficial, timeout=5)
+            if response_oficial.status_code == 200:
+                results["dolar_oficial"] = response_oficial.json().get('venta')
+            
+            url_blue = dolar_config['endpoints']['blue']['url']
+            response_blue = requests.get(url_blue, timeout=5)
+            if response_blue.status_code == 200:
+                results["dolar_blue"] = response_blue.json().get('venta')
+
+            url_mep = dolar_config['endpoints']['bolsa']['url']
+            response_mep = requests.get(url_mep, timeout=5)
+            if response_mep.status_code == 200:
+                results["dolar_mep"] = response_mep.json().get('venta')
+
+            print(f"API_FETCH: Dólar/Riesgo obtenidos (MEP: {results['dolar_mep']})")
+        except Exception as e:
+            print(f"ERROR API Dolar: {e}")
+
+        periodo_ipc, valor_ipc = self.fetch_inflation_with_fallback()
+        if periodo_ipc and valor_ipc is not None:
+            results["ipc_periodo"] = periodo_ipc
+            results["ipc_mes"] = valor_ipc
+            print(f"API_FETCH: IPC Final Asignado ({results['ipc_periodo']}: {results['ipc_mes']}%)")
+        else:
+            results["ipc_periodo"] = "N/D"
+            results["ipc_mes"] = None
+            print("API_FETCH: No se pudo obtener el dato de IPC de ninguna fuente.")
+            
+        return results
+
+
+class DashboardWorker(QObject):
+    """
+    Worker que corre en un hilo separado para cargar TODOS los datos del dashboard 
+    (KPIs internos y APIs externas) sin congelar la UI.
+    """
+    data_loaded = Signal(dict)
+
+    def __init__(self, stats_generator, settings, company_id):
+        super().__init__()
+        self.stats_gen = stats_generator
+        self.settings = settings
+        self.company_id = company_id
+        self.api_connector = ApiConnector()
+        self._is_running = False
+
+    def check_and_fetch_external_data(self, force_refresh=False):
+        """
+        Maneja la lógica de caché. Solo llama a la API si se fuerza (botón manual)
+        o si el caché tiene más de 24 horas o está incompleto/inválido.
+        """
+        CACHE_PREFIX = "admin_panel_cache/"
+        today_str = date.today().isoformat()
+        last_check_date = self.settings.value(f"{CACHE_PREFIX}last_check_date", "")
+
+        cached_data = {}
+        keys_to_load = ["dolar_oficial", "dolar_blue", "dolar_mep", "ipc_mes", "ipc_periodo"]
+        
+        if not force_refresh and last_check_date == today_str:
+            print("CACHE: Verificando datos económicos cacheadados de hoy.")
+            all_valid = True
+            
+            numeric_keys = {"dolar_oficial", "dolar_blue", "dolar_mep", "ipc_mes"}
+
+            for key in keys_to_load:
+                cached_value = self.settings.value(f"{CACHE_PREFIX}{key}", None)
+                
+                if key in numeric_keys and not isinstance(cached_value, (int, float)):
+                    print(f"CACHE INVALIDO: La clave '{key}' no es un número válido (valor: {cached_value}).")
+                    all_valid = False
+                    break
+                
+                if key == "ipc_periodo" and not cached_value:
+                    print(f"CACHE INVALIDO: La clave 'ipc_periodo' está vacía.")
+                    all_valid = False
+                    break
+
+                cached_data[key] = cached_value
+
+            if all_valid:
+                print("CACHE: Los datos cacheadados son válidos y se están utilizando.")
+                return cached_data
+            else:
+                print("CACHE: Datos incompletos o inválidos detectados, refrescando desde API...")
+
+        print("CACHE: Caché expirado, inválido o refresco forzado. Llamando a APIs externas...")
+        api_data = self.api_connector.fetch_external_data()
+        
+        self.settings.setValue(f"{CACHE_PREFIX}last_check_date", today_str)
+        
+        for key in keys_to_load:
+            self.settings.setValue(f"{CACHE_PREFIX}{key}", api_data.get(key))
+
+        return api_data
+
+    def run_all_loads(self, force_api_refresh=False):
+        """
+        Punto de entrada principal del Worker. Se ejecuta en el hilo secundario.
+        """
+        if self._is_running:
+            print("WORKER: Carga de dashboard ya está en progreso. Omitiendo.")
+            return
+
+        self._is_running = True
+        final_results = {}
+
+        try:
+            print("WORKER: Cargando KPIs internos (SQL)...")
+            final_results['kpi_sales_7d'] = self.stats_gen.get_kpi_sales_by_payment_last_7_days(self.company_id)
+            final_results['kpi_total_debt'] = self.stats_gen.get_kpi_total_debt(self.company_id)
+            final_results['kpi_sales_30d'] = self.stats_gen.get_kpi_total_sales_last_30_days(self.company_id)
+
+            print("WORKER: Cargando KPIs externos (API/Caché)...")
+            external_data = self.check_and_fetch_external_data(force_refresh=force_api_refresh)
+            final_results.update(external_data)
+
+            print("WORKER: Carga completa. Emitiendo señal data_loaded.")
+            self.data_loaded.emit(final_results)
+
+        except Exception as e:
+            print(f"ERROR FATAL en DashboardWorker: {e}\n{traceback.format_exc()}")
+            error_dict = {"error": str(e)}
+            self.data_loaded.emit(error_dict)
+        finally:
+            self._is_running = False

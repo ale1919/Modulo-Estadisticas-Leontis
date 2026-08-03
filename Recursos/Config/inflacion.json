@@ -1,0 +1,19 @@
+{
+  "endpoints": [
+    {
+      "nombre": "Datos.gob.ar (Oficial)",
+      "url": "https://apis.datos.gob.ar/series/api/series/?ids=148.3_INIVELNAL_DICI_M_26:percent_change&limit=12&format=json&sort=desc",
+      "parser": "datos_gob_ar",
+      "habilitado": true
+    },
+    {
+      "nombre": "Estadisticas BCRA",
+      "url": "https://api.estadisticasbcra.com/ipc_ng_nacional?order=desc",
+      "parser": "bcra",
+      "headers": {
+        "Authorization": "BEARER TU_TOKEN_AQUI"
+      },
+      "habilitado": true
+    }
+  ]
+}
