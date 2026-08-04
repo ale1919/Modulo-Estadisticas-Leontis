@@ -1,50 +1,39 @@
-import sys
-import pandas as pd
+import base64
 import io
-import traceback
 import os
+import sys
+import traceback
 from datetime import datetime
+
 import matplotlib.pyplot as plt
+import pandas as pd
 import requests
-import base64  
-import json    
-
-from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QStatusBar, QLabel, QFileDialog, QMessageBox, QHBoxLayout,
-    QDialog, QLineEdit, QListWidget, QAbstractItemView, QListWidgetItem, QPushButton, QCheckBox, QDialogButtonBox, QSpacerItem, QSizePolicy, QGroupBox, QComboBox,
-    QScrollArea, QFrame, QTabWidget, QTextBrowser
-)
-from PySide6.QtGui import QIcon, QFont, QPainter, QColor, QPixmap
-from PySide6.QtCore import QSettings, Qt, QTimer, QSize, QThread
-
 from matplotlib.backends.backend_pdf import PdfPages
-from matplotlib.table import Table
+from PySide6.QtCore import QSettings, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtWidgets import (
+    QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
+    QMessageBox, QPushButton, QScrollArea, QStatusBar, QTabWidget, QTextBrowser,
+    QVBoxLayout, QWidget
+)
 
+from Recursos.Modulos.dashboard_manager import DashboardWorker
+from Recursos.Modulos.db_connection import AppLogic, DBManager
 from Recursos.Modulos.matplotlib_widget import MatplotlibWidget
-from Recursos.Modulos.db_connection import DBManager, AppLogic
+from Recursos.Modulos.rutas import BASE_DIR, configurar_logging, log, recurso
 from Recursos.Modulos.statistics_generator import StatisticsGenerator
 from Recursos.Modulos.ui_factory import UIFactory
-from Recursos.Modulos.dashboard_manager import DashboardWorker
-from Recursos.Modulos.ui_styles import BRAND_ACCENT_BUTTON_STYLE, MODERN_CARD_STYLE, MODERN_TAB_STYLE
+from Recursos.Modulos.ui_styles import (
+    BRAND_ACCENT_BUTTON_STYLE, MODERN_CARD_STYLE, MODERN_TAB_STYLE
+)
+from Recursos.Modulos.ui_requisitos import chequear_al_inicio as chequear_requisitos
+from Recursos.Modulos.ui_updater import chequear_al_inicio
 
+_log = log("main")
 
-def resource_path(relative_path):
-    """
-    Obtiene la ruta absoluta a un recurso. Funciona para el modo de desarrollo
-    y para el ejecutable creado por PyInstaller.
-    """
-    try:
-        # PyInstaller crea una carpeta temporal y guarda la ruta en _MEIPASS
-        base_path = sys._MEIPASS
-    except Exception:
-        # Si no está compilado, la base es el directorio del script principal.
-        base_path = os.path.dirname(os.path.abspath(__file__))
-
-    return os.path.join(base_path, relative_path)
-
-# Se usan rutas absolutas dinámicas para los recursos gráficos.
-FAVICON_PATH = resource_path(os.path.join("Recursos", "Grafico", "favicon.ico"))
-LOGO_SQUARE_PATH = resource_path(os.path.join("Recursos", "Grafico", "logo-square.png"))
+FAVICON_PATH = recurso("Recursos", "Grafico", "favicon.ico")
+LOGO_SQUARE_PATH = recurso("Recursos", "Grafico", "logo-square.png")
 
 
 
@@ -56,9 +45,14 @@ class LoginDialog(QDialog):
         self.valid_config_data = None
         self.valid_user_role = None
         
-        # self.crypto_manager = CryptoManager() # <-- Eliminado
         self.db_manager = DBManager()
-        self.API_BASE_URL = "http://sistema.leontis.com.ar:65081" # <-- Añadido
+        # HTTPS: por acá viajan el usuario, la contraseña y —de vuelta— la cadena
+        # de conexión a la base del cliente. Base64 no cifra nada: sobre HTTP
+        # plano todo eso es legible en la red del local.
+        # Si el servidor todavía no tiene certificado, poner ESTADISTICAS_API_URL
+        # con el http:// como salida transitoria, pero hay que resolverlo.
+        self.API_BASE_URL = os.environ.get(
+            "ESTADISTICAS_API_URL", "https://sistema.leontis.com.ar:65081")
 
         self.init_ui()
         self.connect_signals()
@@ -237,27 +231,29 @@ class LoginDialog(QDialog):
                 # La API devuelve la cadena de conexión en Base64. Debemos decodificarla.
                 if connection_string:
                     try:
+                        # Nunca loguear la cadena decodificada: lleva el usuario y
+                        # la contraseña de la base de datos del cliente.
                         connection_string = base64.b64decode(connection_string).decode('utf-8')
-                        print(f"DEBUG: Cadena de conexión decodificada: {connection_string}")
+                        _log.info("Cadena de conexión recibida y decodificada.")
                     except Exception as e:
                         self.show_error(f"Error de API: La 'cadenaConexion' no se pudo decodificar. Error: {e}")
-                        print(f"ERROR: No se pudo decodificar la cadena de conexión en Base64. Original: {api_result.get('cadenaConexion')}")
+                        _log.error("No se pudo decodificar la cadena de conexión en Base64.")
                         return
-                
-                is_admin = api_result.get("isPermitirFacturaElectronicaProduccion", False)
-                # user_role_found = "admin" if is_admin else "usuario"
 
-                # Forzar modo admin para pruebas:
-                user_role_found = "admin"
+                # El rol sale de lo que dice la API. Antes esto estaba forzado a
+                # "admin" con un comentario de "para pruebas", así que todo usuario
+                # veía el Panel de Control y todos los informes.
+                is_admin = api_result.get("isPermitirFacturaElectronicaProduccion", False)
+                user_role_found = "admin" if is_admin else "usuario"
 
                 if not connection_string:
                     self.show_error("Error de API: La respuesta no contiene la 'cadenaConexion'.")
-                    print("WARN: API response OK, but 'cadenaConexion' was missing or empty.")
+                    _log.warning("La API respondió OK pero sin 'cadenaConexion'.")
                     return
-                
+
                 if not allowed_company_ids:
                     self.show_error("Error de API: La respuesta no contiene 'idEmpresasHabilitadas'.")
-                    print("WARN: API response OK, but 'idEmpresasHabilitadas' was missing or empty.")
+                    _log.warning("La API respondió OK pero sin 'idEmpresasHabilitadas'.")
                     return
 
                 # 2. Verificar que la 'cadenaConexion' sea *mínimamente* válida
@@ -265,8 +261,7 @@ class LoginDialog(QDialog):
                 conn_str_lower = connection_string.lower()
                 if "server=" not in conn_str_lower and "data source=" not in conn_str_lower and "dsn=" not in conn_str_lower:
                     self.show_error(f"Error de API: La 'cadenaConexion' recibida no es válida (falta 'Server=' o 'DSN=').")
-                    # Logueamos la cadena mala que recibimos para poder verla
-                    print(f"WARN: API returned invalid 'cadenaConexion': {connection_string}")
+                    _log.warning("La API devolvió una 'cadenaConexion' sin Server=/DSN=.")
                     return
 
                 # 6. Conectar a la base de datos usando la cadena de conexión
@@ -639,9 +634,14 @@ class InstructionsDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
+    # Dispara la carga del dashboard EN EL HILO DEL WORKER. Una señal conectada a
+    # un slot de un QObject que vive en otro hilo usa conexión en cola, que es lo
+    # único que efectivamente cruza de hilo.
+    request_dashboard_load = Signal(bool)
+
     def __init__(self, db_manager, config_data, user_role="usuario"):
         super().__init__()
-        self.setWindowTitle("Analizador de Estadísticas Leontis v4.1")
+        self.setWindowTitle("Analizador de Estadísticas Leontis v4.2")
         self.resize(1100, 700)
         self.setMinimumSize(900, 600)
 
@@ -649,14 +649,25 @@ class MainWindow(QMainWindow):
             QMainWindow {{ background-color: #F0F2F5; }}
             {MODERN_CARD_STYLE}
         """)
-        
+
         self.setWindowIcon(QIcon(FAVICON_PATH))
+
+        # Las preferencias se guardan POR EMPRESA. Con un usuario que tiene varias,
+        # la selección manual de artículos de la canasta son IDs que en otra
+        # empresa apuntan a otro artículo o no existen.
         self.settings = QSettings("Leontis", "AnalizadorEstadisticas")
-        
-        self.db_manager = db_manager 
+        empresa_id = (config_data or {}).get("id_empresa")
+        self.settings_prefix = f"empresa_{empresa_id}/" if empresa_id else ""
+
+        self.db_manager = db_manager
         self.stats_generator = StatisticsGenerator(self.db_manager)
         self.user_role = user_role
-        
+
+        # Cachea el detalle de cada informe mientras dura una exportación:
+        # `generate_statistics()` y `get_detailed_data_for_report()` piden lo mismo
+        # dos veces, y el RFM o la canasta recalculan sobre la base entera.
+        self._cache_informes = {}
+
         self.report_short_names = {
             "top_articles_value": "ArtValor", "top_articles_qty": "ArtCant",
             "top_customers": "Clientes", "sales_over_time": "VentasDia",
@@ -665,9 +676,13 @@ class MainWindow(QMainWindow):
             "export_clients": "ExportClientes", "export_articles": "ExportArticulos",
             "cta_cte": "CtaCte",
             "slob_analysis": "StockObsoleto",
-            "rfm_segmentation": "RFM"
+            "rfm_segmentation": "RFM",
+            "margin_by_article": "Margen",
+            "abc_analysis": "ABC",
+            "purchase_suggestion": "SugeridoCompra",
+            "aging_cta_cte": "Aging",
         }
-        
+
         self.report_buttons = {}  
         self.report_cards = {}    
         self.report_titles = {}   
@@ -712,12 +727,15 @@ class MainWindow(QMainWindow):
 
         self.dashboard_thread = QThread(self)
         self.dashboard_worker = DashboardWorker(
-            self.stats_generator, 
-            self.settings, 
+            self.stats_generator,
+            self.settings,
             self.logic.selected_empresa_id
         )
         self.dashboard_worker.moveToThread(self.dashboard_thread)
         self.dashboard_worker.data_loaded.connect(self.populate_dashboard_cards)
+        # Esta conexión es la que hace que el trabajo corra de verdad en el otro
+        # hilo: emisor en el hilo GUI, receptor en el del worker.
+        self.request_dashboard_load.connect(self.dashboard_worker.run_all_loads)
         self.admin_sync_button.clicked.connect(self.trigger_manual_dashboard_sync)
         self.dashboard_thread.start()
         self.trigger_dashboard_load(force_refresh=False)
@@ -735,20 +753,20 @@ class MainWindow(QMainWindow):
 
         if admin_tab_index != -1:
             if self.user_role == "admin":
-                print("DEBUG: Rol Admin detectado. Mostrando y configurando Panel de Control.")
+                _log.info("Rol Admin: se muestra el Panel de Control.")
                 self.main_tab_widget.setTabVisible(admin_tab_index, True)
                 self.setup_dashboard()
             else:
-                print("DEBUG: Rol Usuario detectado. Ocultando Panel de Control del Administrador.")
+                _log.info("Rol Usuario: se oculta el Panel de Control.")
                 self.main_tab_widget.setTabVisible(admin_tab_index, False)
         else:
-            print("WARN: No se encontró la pestaña 'admin_dashboard_tab'. Posible error de inicialización.")
+            _log.warning("No se encontró la pestaña 'admin_dashboard_tab'.")
             
         if self.user_role == "admin":
-            print("DEBUG: Sesión de Administrador. No se aplican más restricciones de informes.")
+            _log.debug("Sesión de Administrador: sin restricciones de informes.")
             return
 
-        print("DEBUG: Sesión de Usuario. Aplicando restricciones de rol a informes...")
+        _log.debug("Sesión de Usuario: aplicando restricciones de rol.")
         
         allowed_reports = {
             "export_articles",
@@ -764,7 +782,7 @@ class MainWindow(QMainWindow):
                         report_card_widget.setVisible(False)
 
                 except Exception as e:
-                    print(f"WARN: No se pudo aplicar restricción de rol a la tarjeta '{key}'. Error: {e}")
+                    _log.warning("No se pudo restringir la tarjeta '%s': %s", key, e)
 
         for inactive_group, inactive_layout in self.inactive_reports_map.values():
             if self._is_layout_visibly_empty(inactive_layout):
@@ -835,27 +853,106 @@ class MainWindow(QMainWindow):
         
         self.setStatusBar(QStatusBar(self))
 
+    # Informes que son solo tabla: no generan gráfico y en el PDF salen como
+    # tabla renderizada. Tenerlos en un solo lugar evita que cada rama del
+    # exportador arrastre su propia lista.
+    REPORTES_SOLO_TABLA = ("stock_analysis", "market_basket", "slob_analysis",
+                           "purchase_suggestion", "aging_cta_cte")
+
+    # Columnas que conviene recortar en el PDF para que la tabla entre a lo ancho.
+    TRUNCAR_EN_PDF = {
+        "stock_analysis": {"Código": 15, "Descripción": 15},
+        "market_basket": {"Código": 15, "Descripción": 30, "Artículos Asociados": 45},
+        "purchase_suggestion": {"Proveedor": 22, "Código": 12, "Descripción": 28},
+        "aging_cta_cte": {"Cliente": 25, "Teléfono": 15},
+    }
+
     def create_chart_image_in_memory(self, df, title, xlabel, ylabel, chart_type):
+        """Dibuja el gráfico y devuelve (figura, PNG en memoria).
+
+        Quien recibe la figura es responsable de cerrarla con `plt.close()`.
+        """
         if df is None or df.empty:
             return None, None
 
         chart_exporter = MatplotlibWidget()
+        try:
+            if chart_type == "multi-line":
+                chart_exporter.plot_multi_line_chart(df, title, xlabel, ylabel)
+            elif chart_type is True:
+                df_copy = df.copy()
+                df_copy.iloc[:, 0] = pd.to_datetime(df_copy.iloc[:, 0], errors='coerce')
+                df_copy.dropna(subset=[df_copy.columns[0]], inplace=True)
+                if df_copy.empty:
+                    plt.close(chart_exporter.figure)
+                    return None, None
+                chart_exporter.plot_line_chart(
+                    df_copy.iloc[:, 0], df_copy.iloc[:, 1], title, xlabel, ylabel)
+            else:
+                chart_exporter.plot_bar_chart(
+                    df.iloc[:, 0], df.iloc[:, 1], title, xlabel, ylabel)
 
-        if chart_type == "multi-line":
-             chart_exporter.plot_multi_line_chart(df, title, xlabel, ylabel)
-        elif chart_type is True:
-            df_copy = df.copy()
-            df_copy.iloc[:, 0] = pd.to_datetime(df_copy.iloc[:, 0], errors='coerce')
-            df_copy.dropna(subset=[df_copy.columns[0]], inplace=True)
-            chart_exporter.plot_line_chart(df_copy.iloc[:,0], df_copy.iloc[:,1], title, xlabel, ylabel)
-        else:
-            chart_exporter.plot_bar_chart(df.iloc[:,0], df.iloc[:,1], title, xlabel, ylabel)
-        
-        img_buffer = io.BytesIO()
-        chart_exporter.figure.savefig(img_buffer, format='png', bbox_inches='tight', dpi=150)
-        img_buffer.seek(0)
-        
-        return chart_exporter.figure, img_buffer
+            img_buffer = io.BytesIO()
+            chart_exporter.figure.savefig(
+                img_buffer, format='png', bbox_inches='tight', dpi=150)
+            img_buffer.seek(0)
+            return chart_exporter.figure, img_buffer
+        except Exception:
+            plt.close(chart_exporter.figure)
+            _log.exception("No se pudo generar el gráfico '%s'", title)
+            return None, None
+        finally:
+            # El QWidget contenedor no se necesita para exportar: si no se
+            # descarta, cada exportación deja uno vivo con su canvas.
+            chart_exporter.deleteLater()
+
+    def _truncar_para_pdf(self, df, report_name):
+        """Recorta las columnas largas para que la tabla entre en la página."""
+        reglas = self.TRUNCAR_EN_PDF.get(report_name)
+        if not reglas or df is None or df.empty:
+            return df
+
+        df = df.copy()
+        for columna, largo in reglas.items():
+            if columna in df.columns:
+                df[columna] = df[columna].apply(
+                    lambda v, n=largo: v[:n] + ".." if isinstance(v, str) and len(v) > n else v)
+        return df
+
+    def _titulo_tabla_pdf(self, report_name, titulo_por_defecto):
+        """Título del informe-tabla, con la opción elegida en la tarjeta."""
+        if report_name == "stock_analysis":
+            return (f"Análisis de Stock: {self.stock_report_combo.currentText()}"
+                    f" ({self.stock_limit_combo.currentText()})")
+        if report_name == "slob_analysis":
+            return ("Informe de Inventario Obsoleto\n"
+                    f"({self.slob_threshold_combo.currentText()})")
+        if report_name == "market_basket":
+            modo = self.basket_mode_combo.currentText()
+            if self.basket_mode_combo.currentData() == 'manual':
+                modo = f"Manual ({len(self.manual_basket_selection)} art.)"
+            return (f"Análisis de Canasta: {modo}\n"
+                    f"(Período: {self.basket_period_combo.currentText()})")
+        if report_name == "purchase_suggestion":
+            return ("Sugerido de Compra por Proveedor\n"
+                    f"({self.purchase_target_combo.currentText()})")
+        if report_name == "aging_cta_cte":
+            return ("Antigüedad de la Deuda por Cliente\n"
+                    f"({self.aging_limit_combo.currentText()})")
+        return titulo_por_defecto
+
+    def _figura_de_tabla_para_pdf(self, report_name, empresa_id, titulo,
+                                  limite_filas=100):
+        """Arma la figura-tabla de un informe que no tiene gráfico."""
+        df = self.logic.get_detailed_data_for_report(report_name, empresa_id)
+        if df is None or df.empty:
+            return None
+
+        if len(df) > limite_filas:
+            titulo = f"(Primeras {limite_filas} filas de {len(df)}) {titulo}"
+            df = df.head(limite_filas)
+
+        return self._create_table_figure(self._truncar_para_pdf(df, report_name), titulo)
 
     def _create_table_figure(self, df, title):
         if df is None or df.empty:
@@ -910,6 +1007,7 @@ class MainWindow(QMainWindow):
         empresa_id = self.logic.selected_empresa_id
         if not empresa_id: return
 
+        self._cache_informes.clear()
         self.status_bar_message("Generando datos para el PDF...", 0)
         report_data_list = self.logic.generate_statistics()
         
@@ -936,83 +1034,25 @@ class MainWindow(QMainWindow):
         self.settings.setValue("last_export_dir", os.path.dirname(file_path))
 
         all_figures = []
-        for i, (df, title, xlabel, ylabel, chart_type, limit, report_name) in enumerate(report_data_list):
-            self.status_bar_message(f"Procesando sección ({i+1}/{len(report_data_list)}): {title}...", 0)
+        for idx, (df, title, xlabel, ylabel, chart_type, limit, report_name) in enumerate(report_data_list):
+            self.status_bar_message(
+                f"Procesando sección ({idx+1}/{len(report_data_list)}): {title}...", 0)
 
-            if report_name == "stock_analysis":
-                df_stock = self.logic.get_detailed_data_for_report(report_name, empresa_id)
-                stock_title_option = self.stock_report_combo.currentText()
-                pdf_row_limit = 100
-                
-                title_prefix = ""
-                if df_stock is not None and len(df_stock) > pdf_row_limit:
-                    df_for_pdf = df_stock.head(pdf_row_limit).copy()
-                    title_prefix = f"(Primeras {pdf_row_limit} filas) "
-                else:
-                    df_for_pdf = df_stock
-            
-                pdf_title = f"{title_prefix}Análisis de Stock: {stock_title_option}"
-            
-                if df_for_pdf is not None and not df_for_pdf.empty:
-                    def truncar_texto(texto, max_len=15):
-                        return texto[:max_len] + ".." if isinstance(texto, str) and len(texto) > max_len else texto
-                    
-                    df_for_pdf['Código'] = df_for_pdf['Código'].apply(truncar_texto)
-                    df_for_pdf['Descripción'] = df_for_pdf['Descripción'].apply(truncar_texto)
-            
-                figure = self._create_table_figure(df_for_pdf, pdf_title)
-                if figure: all_figures.append(figure)
+            if report_name in self.REPORTES_SOLO_TABLA:
+                figure = self._figura_de_tabla_para_pdf(
+                    report_name, empresa_id, self._titulo_tabla_pdf(report_name, title))
+                if figure:
+                    all_figures.append(figure)
                 continue
 
-            if report_name == "slob_analysis":
-                df_slob = self.logic.get_detailed_data_for_report(report_name, empresa_id)
-                slob_title_option = self.slob_threshold_combo.currentText()
-                pdf_title = f"Informe de Inventario Obsoleto\n({slob_title_option})"
-    
-                pdf_row_limit = 100
-                if df_slob is not None and len(df_slob) > pdf_row_limit:
-                    df_for_pdf = df_slob.head(pdf_row_limit).copy()
-                    pdf_title = f"(Primeras {pdf_row_limit} filas) {pdf_title}"
-                else:
-                    df_for_pdf = df_slob
-    
-                figure = self._create_table_figure(df_for_pdf, pdf_title)
-                if figure: all_figures.append(figure)
-                continue
-
-            if report_name == "market_basket":
-                df_basket = self.logic.get_detailed_data_for_report(report_name, empresa_id)
-                mode_text_raw = self.basket_mode_combo.currentText()
-                if self.basket_mode_combo.currentData() == 'manual':
-                     mode_text_raw = f"Manual ({len(self.manual_basket_selection)} art.)"
-                
-                period_text = self.basket_period_combo.currentText()
-                pdf_title = f"Análisis de Canasta: {mode_text_raw}\n(Período: {period_text})"
-                
-                if df_basket is not None and not df_basket.empty:
-                    def truncar_texto_pdf(texto, max_len=15):
-                        return texto[:max_len] + ".." if isinstance(texto, str) and len(texto) > max_len else texto
-                    
-                    df_basket_pdf = df_basket.copy()
-                    df_basket_pdf['Código'] = df_basket_pdf['Código'].apply(lambda x: truncar_texto_pdf(x, 15))
-                    df_basket_pdf['Descripción'] = df_basket_pdf['Descripción'].apply(lambda x: truncar_texto_pdf(x, 30))
-                    df_basket_pdf['Artículos Asociados'] = df_basket_pdf['Artículos Asociados'].apply(lambda x: truncar_texto_pdf(x, 45))
-                else:
-                    df_basket_pdf = df_basket
-
-                figure = self._create_table_figure(df_basket_pdf, pdf_title)
-                if figure: all_figures.append(figure)
-                continue
-            
-            if report_name == "rfm_segmentation":
-                pass
-
-            is_top_all_report = ("top" in report_name or "cta_cte" in report_name) and limit == -1
-            if is_top_all_report:
+            # "Todos (sin gráfico)": el usuario pidió el listado completo, que va
+            # al Excel. Un gráfico de barras con 4000 filas no se lee.
+            if ("top" in report_name or "cta_cte" in report_name) and limit == -1:
                 continue
 
             figure, _ = self.create_chart_image_in_memory(df, title, xlabel, ylabel, chart_type)
-            if figure: all_figures.append(figure)
+            if figure:
+                all_figures.append(figure)
         
         if all_figures:
             while True:
@@ -1053,6 +1093,7 @@ class MainWindow(QMainWindow):
         empresa_id = self.logic.selected_empresa_id
         if not empresa_id: return
 
+        self._cache_informes.clear()
         self.status_bar_message("Generando datos para Excel...", 0)
 
         try:
@@ -1113,12 +1154,14 @@ class MainWindow(QMainWindow):
                         'font_color': '#9C0006'
                     })
                     
-                    default_cell_format = workbook.add_format() 
-                    
-                    for i, (df_chart, title, xlabel, ylabel, chart_type, limit, report_name) in enumerate(report_data_list):
-                        progress_text = f"Procesando hoja ({i+1}/{len(report_data_list)}): {title}..."
+                    default_cell_format = workbook.add_format()
+
+                    hojas_usadas = set()
+
+                    for idx, (df_chart, title, xlabel, ylabel, chart_type, limit, report_name) in enumerate(report_data_list):
+                        progress_text = f"Procesando hoja ({idx+1}/{len(report_data_list)}): {title}..."
                         self.status_bar_message(progress_text, 0)
-                        
+
                         try:
                             if report_name == "sales_over_time":
                                 continue
@@ -1127,11 +1170,11 @@ class MainWindow(QMainWindow):
                             if df_excel is None or df_excel.empty: continue
                             
                             key_para_titulo = "sales_over_time" if report_name == "sales_by_payment" else report_name
-                            
+
                             base_spanish_title = self.report_titles.get(key_para_titulo, "Reporte")
-                            
-                            sheet_name = base_spanish_title.split('(')[0].strip()[:31]
-                            
+
+                            sheet_name = self._nombre_de_hoja(base_spanish_title, hojas_usadas)
+
                             df_excel.to_excel(writer, sheet_name=sheet_name, index=False, startrow=2, header=False)
                             worksheet = writer.sheets[sheet_name]
                             
@@ -1168,24 +1211,25 @@ class MainWindow(QMainWindow):
                                 worksheet.set_column('F:F', 70)
                                 worksheet.set_column('G:G', 15)
 
+                                # Nombres de variable propios: antes el índice del
+                                # bucle interno pisaba el del `enumerate` de los
+                                # informes, que es la variable que numera las hojas.
                                 target_col_idx = -1
-                                for idx, col_name in enumerate(df_excel.columns):
+                                for col_idx, col_name in enumerate(df_excel.columns):
                                     if col_name == 'Artículos Asociados':
-                                        target_col_idx = idx
+                                        target_col_idx = col_idx
                                         break
-                                
+
                                 if target_col_idx != -1:
-                                    print("DEBUG Excel: Aplicando formato Rich Text a 'Análisis de Canasta'...")
-                                    
-                                    for i in range(len(df_excel)):
-                                        cell_text = str(df_excel.iat[i, target_col_idx])
-                                        items = cell_text.split(', ') 
-                                        
+                                    for fila in range(len(df_excel)):
+                                        cell_text = str(df_excel.iat[fila, target_col_idx])
+                                        items = cell_text.split(', ')
+
                                         segments_to_write = []
-                                        
+
                                         for item_idx, item in enumerate(items):
                                             text_to_add = item if item_idx == len(items) - 1 else item + ", "
-                                            
+
                                             if item_idx % 2 == 0:
                                                 if item_idx == 0:
                                                     segments_to_write.extend([default_cell_format, text_to_add])
@@ -1193,15 +1237,13 @@ class MainWindow(QMainWindow):
                                                     segments_to_write.append(text_to_add)
                                             else:
                                                 segments_to_write.extend([red_text_format, text_to_add])
-                                        
+
                                         if segments_to_write:
                                             # xlsxwriter corrompe el Excel si usas rich_string con menos de 3 argumentos
                                             if len(segments_to_write) <= 2:
-                                                # Escribir como texto normal (segments_to_write[1] es el texto)
-                                                worksheet.write_string(i + 2, target_col_idx, segments_to_write[1], default_cell_format)
+                                                worksheet.write_string(fila + 2, target_col_idx, segments_to_write[1], default_cell_format)
                                             else:
-                                                # Escribir con múltiples colores
-                                                worksheet.write_rich_string(i + 2, target_col_idx, *segments_to_write)
+                                                worksheet.write_rich_string(fila + 2, target_col_idx, *segments_to_write)
 
                             if report_name == "cta_cte":
                                 if 'Fecha' in df_excel.columns:
@@ -1237,16 +1279,42 @@ class MainWindow(QMainWindow):
                             if report_name == "slob_analysis":
                                 worksheet.set_column('E:E', 20, currency_format)
 
-                            is_special_report = report_name in ["stock_analysis", "market_basket", "slob_analysis"]
+                            if report_name == "margin_by_article":
+                                worksheet.set_column('D:F', 18, currency_format)
+
+                            if report_name == "abc_analysis":
+                                worksheet.set_column('F:F', 18, currency_format)
+                                worksheet.set_column('J:J', 20, currency_format)
+
+                            if report_name == "purchase_suggestion":
+                                worksheet.set_column('A:A', 28)
+                                worksheet.set_column('C:C', 35)
+                                worksheet.set_column('J:K', 18, currency_format)
+
+                            if report_name == "aging_cta_cte":
+                                worksheet.set_column('B:B', 30)
+                                worksheet.set_column('D:I', 16, currency_format)
+
                             is_top_all_report = ("top" in report_name or "cta_cte" in report_name) and limit == -1
-                            
-                            if not is_special_report and not is_top_all_report:
-                                 _ , img_buffer = self.create_chart_image_in_memory(df_chart, title, xlabel, ylabel, chart_type)
-                                 # Verificación de seguridad: solo insertar si la imagen es válida (> 1KB)
-                                 if img_buffer and img_buffer.getbuffer().nbytes > 1000:
-                                    worksheet.insert_image(2, len(df_excel.columns) + 1, '', {'image_data': img_buffer})
-                        
+
+                            if report_name not in self.REPORTES_SOLO_TABLA and not is_top_all_report:
+                                figura, img_buffer = self.create_chart_image_in_memory(
+                                    df_chart, title, xlabel, ylabel, chart_type)
+                                try:
+                                    # Solo insertar si la imagen es válida (> 1 KB)
+                                    if img_buffer and img_buffer.getbuffer().nbytes > 1000:
+                                        worksheet.insert_image(
+                                            2, len(df_excel.columns) + 1, '',
+                                            {'image_data': img_buffer})
+                                finally:
+                                    # En la ruta del PDF las figuras se cierran al
+                                    # escribirlas; acá no se cerraban nunca y cada
+                                    # exportación dejaba unas cuantas abiertas.
+                                    if figura is not None:
+                                        plt.close(figura)
+
                         except Exception as e:
+                            _log.exception("Error al procesar el reporte '%s'", title)
                             QMessageBox.warning(self, "Error en Reporte", f"Ocurrió un error al procesar el reporte '{title}':\n{e}\n\nSe continuará con los demás.")
 
                 self.status_bar_message(f"¡Éxito! Informe guardado en {file_path}", 7000)
@@ -1271,6 +1339,28 @@ class MainWindow(QMainWindow):
                 self.status_bar_message(f"Error al exportar a Excel: {e}", 7000)
                 QMessageBox.critical(self, "Error de Exportación", f"No se pudo guardar el archivo Excel:\n{e}")
                 break
+
+    @staticmethod
+    def _nombre_de_hoja(titulo, usados):
+        """Nombre de hoja válido y único.
+
+        Excel prohíbe []:*?/\\ y corta en 31 caracteres. Dos informes cuyos
+        títulos coincidan al truncarse harían abortar la exportación entera con
+        un "Sheetname already used", así que se desambigua con un sufijo.
+        """
+        limpio = titulo.split('(')[0].strip()
+        for caracter in '[]:*?/\\':
+            limpio = limpio.replace(caracter, ' ')
+        limpio = ' '.join(limpio.split())[:31] or "Reporte"
+
+        candidato, n = limpio, 2
+        while candidato.lower() in usados:
+            sufijo = f" {n}"
+            candidato = limpio[:31 - len(sufijo)] + sufijo
+            n += 1
+
+        usados.add(candidato.lower())
+        return candidato
 
     def export_quick_clients_excel(self):
         mode = self.export_clients_mode_combo.currentData()
@@ -1342,7 +1432,7 @@ class MainWindow(QMainWindow):
 
     def handle_report_toggle(self, key, is_active):
         if key not in self.report_widget_config:
-            print(f"WARN: Clave de reporte desconocida: {key}")
+            _log.warning("Clave de reporte desconocida: %s", key)
             return
 
         config = self.report_widget_config[key]
@@ -1443,90 +1533,113 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(duration, self.status_label.clear)
         QApplication.processEvents()
 
+    # Combos cuya posición se recuerda: atributo -> índice por defecto.
+    COMBOS_PERSISTIDOS = {
+        "top_articles_value_limit_combo": 0, "top_articles_value_period_combo": 1,
+        "top_articles_qty_limit_combo": 0, "top_articles_qty_period_combo": 1,
+        "top_customers_limit_combo": 0, "top_customers_period_combo": 1,
+        "sales_period_combo": 1,
+        "stock_report_combo": 0, "stock_limit_combo": 0,
+        "basket_mode_combo": 0, "basket_period_combo": 1, "basket_assoc_limit_combo": 1,
+        "export_clients_mode_combo": 0, "export_articles_mode_combo": 0,
+        "cta_cte_cliente_combo": 3, "cta_cte_voucher_combo": 0,
+        "slob_threshold_combo": 1,
+        "margin_limit_combo": 1, "margin_period_combo": 1,
+        "abc_period_combo": 0,
+        "purchase_period_combo": 1, "purchase_target_combo": 1,
+        "aging_limit_combo": 3,
+    }
+
+    def _clave(self, nombre):
+        """Clave de QSettings con el prefijo de la empresa activa."""
+        return f"{self.settings_prefix}{nombre}"
+
     def save_settings(self):
-        if self.is_loading_settings: return
+        if self.is_loading_settings:
+            return
 
-        print("DEBUG: Guardando todas las configuraciones del usuario...")
-        
+        _log.debug("Guardando preferencias del usuario.")
+
         for name, button in self.report_buttons.items():
-            self.settings.setValue(f"stat_{name}_active", button.isChecked())
-            
-        self.settings.setValue("top_articles_value_limit_index", self.top_articles_value_limit_combo.currentIndex())
-        self.settings.setValue("top_articles_value_period_index", self.top_articles_value_period_combo.currentIndex())
-        self.settings.setValue("top_articles_qty_limit_index", self.top_articles_qty_limit_combo.currentIndex())
-        self.settings.setValue("top_articles_qty_period_index", self.top_articles_qty_period_combo.currentIndex())
-        self.settings.setValue("top_customers_limit_index", self.top_customers_limit_combo.currentIndex())
-        self.settings.setValue("top_customers_period_index", self.top_customers_period_combo.currentIndex())
-        self.settings.setValue("include_cf_checked", self.include_cf_checkbox.isChecked())
-        self.settings.setValue("sales_period_index", self.sales_period_combo.currentIndex())
+            self.settings.setValue(self._clave(f"stat_{name}_active"), button.isChecked())
+
+        for atributo, _ in self.COMBOS_PERSISTIDOS.items():
+            combo = getattr(self, atributo, None)
+            if combo is not None:
+                self.settings.setValue(self._clave(f"{atributo}_index"),
+                                       combo.currentIndex())
+
+        self.settings.setValue(self._clave("include_cf_checked"),
+                               self.include_cf_checkbox.isChecked())
         for name, chk in self.payment_method_checkboxes.items():
-            self.settings.setValue(f"payment_{name}_checked", chk.isChecked())
-        self.settings.setValue("stock_report_index", self.stock_report_combo.currentIndex())
+            self.settings.setValue(self._clave(f"payment_{name}_checked"), chk.isChecked())
 
-        self.settings.setValue("basket_mode_index", self.basket_mode_combo.currentIndex())
-        self.settings.setValue("manual_basket_selection", self.manual_basket_selection)
-        self.settings.setValue("basket_period_index", self.basket_period_combo.currentIndex())
-        self.settings.setValue("basket_assoc_limit_index", self.basket_assoc_limit_combo.currentIndex())
+        # Como lista de strings: QSettings en Windows los devuelve así de todos
+        # modos, y guardarlos ya normalizados hace que leerlos sea simétrico.
+        self.settings.setValue(self._clave("manual_basket_selection"),
+                               [str(x) for x in self.manual_basket_selection])
 
-        self.settings.setValue("export_clients_mode_index", self.export_clients_mode_combo.currentIndex())
-        self.settings.setValue("export_articles_mode_index", self.export_articles_mode_combo.currentIndex())
-
-        self.settings.setValue("cta_cte_cliente_index", self.cta_cte_cliente_combo.currentIndex())
-        self.settings.setValue("cta_cte_voucher_index", self.cta_cte_voucher_combo.currentIndex())
-        self.settings.setValue("slob_threshold_index", self.slob_threshold_combo.currentIndex())
-        
         self.settings.sync()
 
     def load_settings(self):
         self.is_loading_settings = True
         try:
-            print("DEBUG: Cargando configuraciones del usuario...")
-            
+            _log.debug("Cargando preferencias del usuario.")
+
             for name, button in self.report_buttons.items():
-                is_active = self.settings.value(f"stat_{name}_active", True, type=bool)
+                is_active = self.settings.value(
+                    self._clave(f"stat_{name}_active"), True, type=bool)
                 if button.isChecked() != is_active:
-                     button.setChecked(is_active)
+                    button.setChecked(is_active)
                 else:
-                    QTimer.singleShot(0, lambda n=name, a=is_active: self.handle_report_toggle(n, a))
+                    QTimer.singleShot(
+                        0, lambda n=name, a=is_active: self.handle_report_toggle(n, a))
 
-            self.top_articles_value_limit_combo.setCurrentIndex(self.settings.value("top_articles_value_limit_index", 0, type=int))
-            self.top_articles_value_period_combo.setCurrentIndex(self.settings.value("top_articles_value_period_index", 1, type=int))
-            self.top_articles_qty_limit_combo.setCurrentIndex(self.settings.value("top_articles_qty_limit_index", 0, type=int))
-            self.top_articles_qty_period_combo.setCurrentIndex(self.settings.value("top_articles_qty_period_index", 1, type=int))
-            self.top_customers_limit_combo.setCurrentIndex(self.settings.value("top_customers_limit_index", 0, type=int))
-            self.top_customers_period_combo.setCurrentIndex(self.settings.value("top_customers_period_index", 1, type=int))
-            self.include_cf_checkbox.setChecked(self.settings.value("include_cf_checked", False, type=bool))
-            self.sales_period_combo.setCurrentIndex(self.settings.value("sales_period_index", 1, type=int))
-            
+            for atributo, por_defecto in self.COMBOS_PERSISTIDOS.items():
+                combo = getattr(self, atributo, None)
+                if combo is None:
+                    continue
+                indice = self.settings.value(
+                    self._clave(f"{atributo}_index"), por_defecto, type=int)
+                # Un índice guardado por una versión con más opciones dejaría el
+                # combo en -1 y `currentData()` devolvería None.
+                if 0 <= indice < combo.count():
+                    combo.setCurrentIndex(indice)
+                else:
+                    combo.setCurrentIndex(min(por_defecto, combo.count() - 1))
+
+            self.include_cf_checkbox.setChecked(
+                self.settings.value(self._clave("include_cf_checked"), False, type=bool))
+
             for name, chk in self.payment_method_checkboxes.items():
-                is_checked = self.settings.value(f"payment_{name}_checked", True, type=bool)
-                chk.setChecked(is_checked)
-                
-            self.stock_report_combo.setCurrentIndex(self.settings.value("stock_report_index", 0, type=int))
-            self.basket_mode_combo.setCurrentIndex(self.settings.value("basket_mode_index", 0, type=int))
-            self.manual_basket_selection = self.settings.value("manual_basket_selection", [])
-            self.basket_period_combo.setCurrentIndex(self.settings.value("basket_period_index", 1, type=int))
-            self.basket_assoc_limit_combo.setCurrentIndex(self.settings.value("basket_assoc_limit_index", 1, type=int))
-            
-            self.export_clients_mode_combo.setCurrentIndex(self.settings.value("export_clients_mode_index", 0, type=int))
-            self.export_articles_mode_combo.setCurrentIndex(self.settings.value("export_articles_mode_index", 0, type=int))
+                chk.setChecked(self.settings.value(
+                    self._clave(f"payment_{name}_checked"), True, type=bool))
 
-            self.cta_cte_cliente_combo.setCurrentIndex(self.settings.value("cta_cte_cliente_index", 3, type=int))
-            self.cta_cte_voucher_combo.setCurrentIndex(self.settings.value("cta_cte_voucher_index", 0, type=int))
-            self.slob_threshold_combo.setCurrentIndex(self.settings.value("slob_threshold_index", 1, type=int))
+            # QSettings devuelve strings: sin convertir a int, la comparación
+            # contra `idArticulo` (int) del modal fallaba siempre y la selección
+            # guardada aparecía vacía.
+            guardado = self.settings.value(self._clave("manual_basket_selection"), []) or []
+            if isinstance(guardado, str):
+                guardado = [guardado]
+            seleccion = []
+            for valor in guardado:
+                try:
+                    seleccion.append(int(valor))
+                except (TypeError, ValueError):
+                    continue
+            self.manual_basket_selection = seleccion
 
             QTimer.singleShot(10, self.on_basket_mode_changed)
-        
+
         finally:
             self.is_loading_settings = False
 
     def trigger_dashboard_load(self, force_refresh):
-        QTimer.singleShot(0, lambda: self.dashboard_worker.run_all_loads(force_api_refresh=force_refresh))
-        
         self.reset_dashboard_labels_to_loading()
+        self.request_dashboard_load.emit(bool(force_refresh))
 
     def trigger_manual_dashboard_sync(self):
-        print("UI: Disparando refresco manual de API.")
+        _log.debug("Refresco manual de la API del panel.")
         self.status_bar_message("Sincronizando datos externos (API)...", 3000)
         self.trigger_dashboard_load(force_refresh=True)
 
@@ -1544,8 +1657,8 @@ class MainWindow(QMainWindow):
         self.findChild(QLabel, "kpi_val_ipc_periodo").setText("(Período: N/D)")
 
     def populate_dashboard_cards(self, results):
-        print("UI: Recibidos datos del DashboardWorker. Poblando tarjetas KPI.")
-        
+        _log.debug("Datos del DashboardWorker recibidos; poblando tarjetas KPI.")
+
         if results.get("error"):
             QMessageBox.warning(self, "Error de Dashboard", f"No se pudieron cargar los datos del panel: {results.get('error')}")
             return
@@ -1579,32 +1692,70 @@ class MainWindow(QMainWindow):
         self.status_bar_message("Panel de Control actualizado.", 4000)
 
     def closeEvent(self, event):
-        """Cierra correctamente el hilo del dashboard antes de salir."""
+        """Guarda las preferencias y cierra el hilo del dashboard."""
+        # Antes esto solo pasaba si el usuario exportaba algo y encima elegía
+        # "Cerrar el programa" en el cartel del final: cerrando con la X se
+        # perdía todo, en contra de lo que promete el manual de la app.
+        try:
+            self.save_settings()
+        except Exception:
+            _log.exception("No se pudieron guardar las preferencias al cerrar.")
+
         try:
             if self.dashboard_thread and self.dashboard_thread.isRunning():
-                print("DEBUG: Cerrando dashboard_thread de forma segura...")
                 self.dashboard_thread.quit()
                 self.dashboard_thread.wait(3000)
         except Exception as e:
-            print(f"WARN: No se pudo cerrar correctamente el dashboard_thread: {e}")
-        
+            _log.warning("No se pudo cerrar el dashboard_thread: %s", e)
+
         super().closeEvent(event)
 
-if __name__ == '__main__':
-    app = QApplication(sys.argv)
 
-    # Establece un estilo claro para toda la aplicación,
+def main():
+    configurar_logging()
+    _log.info("Iniciando Analizador de Estadísticas Leontis.")
+
+    app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    app.setWindowIcon(QIcon(FAVICON_PATH))
+
+    # Que el sistema tenga lo que la app necesita (el redistribuible de Visual
+    # C++ y compañía). La primera pasada es local y no toca la red: en un
+    # arranque normal no se ve ninguna ventana.
+    if not chequear_requisitos():
+        return 0
+
+    # Autoactualización antes de todo lo demás: si hay versión nueva, la instala
+    # y relanza el .exe. Devuelve False cuando la app NO tiene que seguir
+    # arrancando; si se sigue de largo quedan dos procesos. En desarrollo (.py)
+    # no hace nada.
+    if not chequear_al_inicio(BASE_DIR):
+        return 0
 
     login_dialog = LoginDialog()
-    
-    if login_dialog.exec():
-        dbm = login_dialog.valid_db_manager
-        config = login_dialog.valid_config_data
-        role = login_dialog.valid_user_role 
-        
-        window = MainWindow(db_manager=dbm, config_data=config, user_role=role)
-        window.show()
-        sys.exit(app.exec())
-    else:
-        sys.exit(0)
+
+    if not login_dialog.exec():
+        return 0
+
+    try:
+        window = MainWindow(
+            db_manager=login_dialog.valid_db_manager,
+            config_data=login_dialog.valid_config_data,
+            user_role=login_dialog.valid_user_role,
+        )
+    except Exception:
+        # Sin esto, en el .exe compilado (sin consola) un error al construir la
+        # ventana hace que la app simplemente no aparezca: sin cartel, sin nada.
+        _log.exception("No se pudo construir la ventana principal.")
+        QMessageBox.critical(
+            None, "Analizador de Estadísticas Leontis",
+            "La app no pudo abrirse.\n\n"
+            f"{traceback.format_exc()}\n\nEl detalle quedó en el log.")
+        return 1
+
+    window.show()
+    return app.exec()
+
+
+if __name__ == '__main__':
+    sys.exit(main())

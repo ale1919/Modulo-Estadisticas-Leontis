@@ -1,37 +1,21 @@
 import os
-import sys
-from PySide6.QtWidgets import (
-    QGroupBox, QVBoxLayout, QGridLayout, QLabel, QLineEdit, QComboBox,
-    QPushButton, QCompleter, QCheckBox, QHBoxLayout, QSpacerItem, QSizePolicy, 
-    QWidget, QFrame, QMessageBox, QLayout, QTabWidget, QScrollArea, QTextBrowser
-)
-from PySide6.QtCore import Qt, QTimer
+
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
-from .ui_styles import ( 
-    GREEN_BUTTON_STYLE, BLUE_BUTTON_STYLE, RED_BUTTON_STYLE,
-    get_modern_card_style, get_modern_checkbox_style, MODERN_COMBOBOX_STYLE, FOOTER_FRAME_STYLE,
-    BRAND_HEADER_STYLE, MODERN_TAB_STYLE, PENCIL_TOGGLE_BUTTON_STYLE,
-    HEADER_HELP_BUTTON_STYLE, BRAND_ACCENT_BUTTON_STYLE
+from PySide6.QtWidgets import (
+    QCheckBox, QComboBox, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+    QLayout, QLineEdit, QPushButton, QScrollArea, QSizePolicy, QSpacerItem,
+    QVBoxLayout, QWidget
 )
 
-# --- INICIO DE CAMBIOS PARA COMPILACIÓN ---
+from .rutas import recurso
+from .ui_styles import (
+    BRAND_ACCENT_BUTTON_STYLE, BRAND_HEADER_STYLE, FOOTER_FRAME_STYLE,
+    GREEN_BUTTON_STYLE, HEADER_HELP_BUTTON_STYLE, MODERN_COMBOBOX_STYLE,
+    MODERN_TAB_STYLE, PENCIL_TOGGLE_BUTTON_STYLE, RED_BUTTON_STYLE,
+    get_modern_card_style, get_modern_checkbox_style
+)
 
-def resource_path(relative_path):
-    """
-    Obtiene la ruta absoluta a un recurso. Funciona para el modo de desarrollo
-    y para el ejecutable creado por PyInstaller.
-    """
-    try:
-        # PyInstaller crea una carpeta temporal y guarda la ruta en _MEIPASS
-        base_path = sys._MEIPASS
-    except Exception:
-        # Si no está compilado, la base es la raíz del proyecto.
-        # Se sube dos niveles desde este archivo (.../Recursos/Modulos/ -> ../Recursos/ -> ./)
-        base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-
-    return os.path.join(base_path, relative_path)
-
-# --- FIN DE CAMBIOS PARA COMPILACIÓN ---
 
 class UIFactory:
     def __init__(self, main_window):
@@ -139,6 +123,18 @@ class UIFactory:
         combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         combo.setMinimumWidth(280)
+        return combo
+
+    def _combo(self, opciones, indice=0, ancho=280):
+        """ComboBox con el estilo de la app. `opciones` es [(texto, dato), ...]."""
+        combo = QComboBox()
+        for texto, dato in opciones:
+            combo.addItem(texto, dato)
+        combo.setCurrentIndex(indice)
+        combo.setStyleSheet(MODERN_COMBOBOX_STYLE)
+        combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        combo.setMinimumWidth(ancho)
         return combo
 
     def _create_voucher_detail_combo(self):
@@ -256,11 +252,7 @@ class UIFactory:
 
 
     def create_statistics_panel(self):
-        tab_widget = QTabWidget()
-        tab_widget.setStyleSheet(MODERN_TAB_STYLE)
-        tab_widget.setVisible(False)
-
-        self.main_window.report_buttons = {} 
+        self.main_window.report_buttons = {}
         self.main_window.report_cards = {}
         self.main_window.report_titles = {}
         
@@ -332,17 +324,23 @@ class UIFactory:
         desc4 = "Grafica la evolución de ventas diarias (Línea) y por medio de pago (Multilínea). Útil para PDF."
         card4 = self._create_report_card("sales_over_time", "Ventas por Día", desc4, card4_widgets, "CardStyle1C4K")
         
-        self.main_window.stock_report_combo = QComboBox()
-        self.main_window.stock_report_combo.addItem("Top 30 con más stock", "top_mas_stock")
-        self.main_window.stock_report_combo.addItem("Top 30 con menos stock (positivo)", "top_menos_stock")
-        self.main_window.stock_report_combo.addItem("Artículos con stock Cero o Negativo", "cero_negativo")
-        self.main_window.stock_report_combo.addItem("Todos los artículos (Solo Excel)", "todos_stock")
-        self.main_window.stock_report_combo.setStyleSheet(MODERN_COMBOBOX_STYLE)
-        self.main_window.stock_report_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self.main_window.stock_report_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-        self.main_window.stock_report_combo.setMinimumWidth(280)
-        
-        card5_widgets = [ QLabel("Reporte:"), self.main_window.stock_report_combo ]
+        self.main_window.stock_report_combo = self._combo([
+            ("Con más stock", "top_mas_stock"),
+            ("Con menos stock (positivo)", "top_menos_stock"),
+            ("Artículos con stock Cero o Negativo", "cero_negativo"),
+            ("Todos los artículos (Solo Excel)", "todos_stock"),
+        ])
+        # El límite es su propio combo con `currentData()`. Antes salía de buscar
+        # la cadena "30" dentro del texto del combo de arriba, así que cambiar una
+        # etiqueta cambiaba en silencio cuántas filas traía el informe.
+        self.main_window.stock_limit_combo = self._combo([
+            ("Top 30", 30), ("Top 50", 50), ("Top 100", 100), ("Todos", -1),
+        ])
+
+        card5_widgets = [
+            QLabel("Reporte:"), self.main_window.stock_report_combo,
+            QLabel("Cantidad:"), self.main_window.stock_limit_combo,
+        ]
         desc5 = "Genera un listado de stock (solo Excel/PDF Tabla). Use el combo para filtrar por existencias."
         card5 = self._create_report_card("stock_analysis", "Análisis de Stock (Tabla)", desc5, card5_widgets, "CardStyle1C")
 
@@ -425,12 +423,62 @@ class UIFactory:
 
         desc_rfm = "Segmenta clientes por Recencia, Frecuencia y Valor (Gráfico PDF y Excel). No requiere configuración."
         card_rfm = self._create_report_card(
-            "rfm_segmentation", 
-            "Segmentación de Clientes (RFM)", 
+            "rfm_segmentation",
+            "Segmentación de Clientes (RFM)",
             desc_rfm,
             [],
             "CardStyleInfoOnly"
         )
+
+        # --- Informes nuevos (ver AUDITORIA.md §3) ------------------------- #
+
+        self.main_window.margin_limit_combo = self._create_limit_combo()
+        self.main_window.margin_limit_combo.setCurrentIndex(1)
+        self.main_window.margin_period_combo = self._create_period_combo()
+        card_margen = self._create_report_card(
+            "margin_by_article", "Margen Bruto por Artículo",
+            "Qué artículos DEJAN más plata, no cuáles facturan más. El costo que se "
+            "usa es el actual del artículo, así que en ventas viejas el margen queda "
+            "subestimado.",
+            [QLabel("Mostrar:"), self.main_window.margin_limit_combo,
+             QLabel("Período:"), self.main_window.margin_period_combo],
+            "CardStyle2C")
+
+        self.main_window.abc_period_combo = self._create_period_combo()
+        self.main_window.abc_period_combo.setCurrentIndex(0)
+        card_abc = self._create_report_card(
+            "abc_analysis", "Curva ABC de Artículos",
+            "Clasifica los artículos por facturación acumulada: A = el 80% de la "
+            "venta, B = hasta el 95%, C = la cola. Dice a qué prestarle atención.",
+            [QLabel("Período:"), self.main_window.abc_period_combo],
+            "CardStyle1C")
+
+        self.main_window.purchase_period_combo = self._create_period_combo()
+        self.main_window.purchase_period_combo.setCurrentIndex(1)
+        self.main_window.purchase_target_combo = self._combo([
+            ("Cubrir 15 días de venta", 15),
+            ("Cubrir 30 días de venta", 30),
+            ("Cubrir 45 días de venta", 45),
+            ("Cubrir 60 días de venta", 60),
+        ], indice=1)
+        card_compra = self._create_report_card(
+            "purchase_suggestion", "Sugerido de Compra por Proveedor",
+            "Qué reponer y a quién pedírselo, cruzando stock, stock mínimo y "
+            "velocidad de venta. Sale agrupado por proveedor (solo Excel/PDF Tabla).",
+            [QLabel("Medir la venta sobre:"), self.main_window.purchase_period_combo,
+             QLabel("Objetivo de reposición:"), self.main_window.purchase_target_combo],
+            "CardStyle2C")
+
+        self.main_window.aging_limit_combo = self._combo([
+            ("Top 20 deudores", 20), ("Top 50 deudores", 50),
+            ("Top 100 deudores", 100), ("Todos", -1),
+        ], indice=3)
+        card_aging = self._create_report_card(
+            "aging_cta_cte", "Antigüedad de la Deuda (Aging)",
+            "Reparte la deuda abierta de cada cliente en tramos: por vencer, 1-30, "
+            "31-60, 61-90 y más de 90 días (solo Excel/PDF Tabla).",
+            [QLabel("Alcance:"), self.main_window.aging_limit_combo],
+            "CardStyle1C")
 
         self.main_window.admin_dashboard_tab = QWidget() 
         admin_tab_layout = QVBoxLayout(self.main_window.admin_dashboard_tab)
@@ -444,9 +492,12 @@ class UIFactory:
         admin_header_layout.addStretch()
 
         self.main_window.admin_sync_button = QPushButton(" Actualizar Datos Externos")
-        # Se usa la función resource_path para encontrar el ícono
-        sync_icon_path = resource_path(os.path.join("Recursos", "Grafico", "sync-icon.png"))
-        self.main_window.admin_sync_button.setIcon(QIcon(sync_icon_path)) 
+        # `sync-icon.png` no existe en Recursos/Grafico: se pedía un archivo que
+        # nunca estuvo y el botón quedaba sin icono. Se usa el que sí está, y solo
+        # si el archivo existe de verdad.
+        sync_icon_path = recurso("Recursos", "Grafico", "logo-square.png")
+        if os.path.isfile(sync_icon_path):
+            self.main_window.admin_sync_button.setIcon(QIcon(sync_icon_path))
         self.main_window.admin_sync_button.setStyleSheet(BRAND_ACCENT_BUTTON_STYLE)
         self.main_window.admin_sync_button.setFixedSize(200, 35)
         admin_header_layout.addWidget(self.main_window.admin_sync_button)
@@ -558,8 +609,10 @@ class UIFactory:
         layout_articulos_activos.setSpacing(15)
         layout_articulos_activos.addWidget(card1, 0, 0)
         layout_articulos_activos.addWidget(card2, 0, 1)
-        layout_articulos_activos.addWidget(card6, 1, 0, 1, 2)
-        layout_articulos_activos.addWidget(card8, 2, 0, 1, 2) 
+        layout_articulos_activos.addWidget(card_margen, 1, 0)
+        layout_articulos_activos.addWidget(card_abc, 1, 1)
+        layout_articulos_activos.addWidget(card6, 2, 0, 1, 2)
+        layout_articulos_activos.addWidget(card8, 3, 0, 1, 2)
         layout_articulos_activos.setColumnStretch(0, 1)
         layout_articulos_activos.setColumnStretch(1, 1)
         layout_articulos_main.addLayout(layout_articulos_activos)
@@ -575,8 +628,9 @@ class UIFactory:
         layout_clientes_activos.setSpacing(15)
         layout_clientes_activos.addWidget(card3, 0, 0)
         layout_clientes_activos.addWidget(card9, 1, 0)
-        layout_clientes_activos.addWidget(card_rfm, 2, 0)
-        layout_clientes_activos.addWidget(card7, 3, 0)
+        layout_clientes_activos.addWidget(card_aging, 2, 0)
+        layout_clientes_activos.addWidget(card_rfm, 3, 0)
+        layout_clientes_activos.addWidget(card7, 4, 0)
         layout_clientes_activos.setColumnStretch(0, 1)
         layout_clientes_main.addLayout(layout_clientes_activos)
         layout_clientes_main.addWidget(self._create_inactive_reports_group("clientes"))
@@ -604,6 +658,7 @@ class UIFactory:
         layout_Stock_activos.setSpacing(15)
         layout_Stock_activos.addWidget(card5, 0, 0)
         layout_Stock_activos.addWidget(card10, 1, 0)
+        layout_Stock_activos.addWidget(card_compra, 2, 0)
         layout_Stock_activos.setColumnStretch(0, 1)
         layout_Stock_main.addLayout(layout_Stock_activos)
         layout_Stock_main.addWidget(self._create_inactive_reports_group("Stock"))
@@ -613,17 +668,21 @@ class UIFactory:
         self.main_window.main_tab_widget.addTab(tab_Stock, "Stock")
         
         self.main_window.report_widget_config = {
-            "top_articles_value": {"widget": card1, "layout": layout_articulos_activos, "pos": (0, 0, 1, 1), "tab_key": "articulos"},
-            "top_articles_qty":   {"widget": card2, "layout": layout_articulos_activos, "pos": (0, 1, 1, 1), "tab_key": "articulos"},
-            "market_basket":      {"widget": card6, "layout": layout_articulos_activos, "pos": (1, 0, 1, 2), "tab_key": "articulos"},
-            "export_articles":    {"widget": card8, "layout": layout_articulos_activos, "pos": (2, 0, 1, 2), "tab_key": "articulos"}, 
-            "top_customers":      {"widget": card3, "layout": layout_clientes_activos,  "pos": (0, 0, 1, 1), "tab_key": "clientes"},
-            "cta_cte":            {"widget": card9, "layout": layout_clientes_activos,  "pos": (1, 0, 1, 1), "tab_key": "clientes"},
-            "rfm_segmentation":   {"widget": card_rfm, "layout": layout_clientes_activos, "pos": (2, 0, 1, 1), "tab_key": "clientes"},
-            "export_clients":     {"widget": card7, "layout": layout_clientes_activos,  "pos": (3, 0, 1, 1), "tab_key": "clientes"},
-            "sales_over_time":    {"widget": card4, "layout": layout_ventas_activos,    "pos": (0, 0, 1, 1), "tab_key": "ventas"},
-            "stock_analysis":     {"widget": card5, "layout": layout_Stock_activos,    "pos": (0, 0, 1, 1), "tab_key": "Stock"},
-            "slob_analysis":      {"widget": card10, "layout": layout_Stock_activos,   "pos": (1, 0, 1, 1), "tab_key": "Stock"},
+            "top_articles_value":  {"widget": card1, "layout": layout_articulos_activos, "pos": (0, 0, 1, 1), "tab_key": "articulos"},
+            "top_articles_qty":    {"widget": card2, "layout": layout_articulos_activos, "pos": (0, 1, 1, 1), "tab_key": "articulos"},
+            "margin_by_article":   {"widget": card_margen, "layout": layout_articulos_activos, "pos": (1, 0, 1, 1), "tab_key": "articulos"},
+            "abc_analysis":        {"widget": card_abc, "layout": layout_articulos_activos, "pos": (1, 1, 1, 1), "tab_key": "articulos"},
+            "market_basket":       {"widget": card6, "layout": layout_articulos_activos, "pos": (2, 0, 1, 2), "tab_key": "articulos"},
+            "export_articles":     {"widget": card8, "layout": layout_articulos_activos, "pos": (3, 0, 1, 2), "tab_key": "articulos"},
+            "top_customers":       {"widget": card3, "layout": layout_clientes_activos,  "pos": (0, 0, 1, 1), "tab_key": "clientes"},
+            "cta_cte":             {"widget": card9, "layout": layout_clientes_activos,  "pos": (1, 0, 1, 1), "tab_key": "clientes"},
+            "aging_cta_cte":       {"widget": card_aging, "layout": layout_clientes_activos, "pos": (2, 0, 1, 1), "tab_key": "clientes"},
+            "rfm_segmentation":    {"widget": card_rfm, "layout": layout_clientes_activos, "pos": (3, 0, 1, 1), "tab_key": "clientes"},
+            "export_clients":      {"widget": card7, "layout": layout_clientes_activos,  "pos": (4, 0, 1, 1), "tab_key": "clientes"},
+            "sales_over_time":     {"widget": card4, "layout": layout_ventas_activos,    "pos": (0, 0, 1, 1), "tab_key": "ventas"},
+            "stock_analysis":      {"widget": card5, "layout": layout_Stock_activos,     "pos": (0, 0, 1, 1), "tab_key": "Stock"},
+            "slob_analysis":       {"widget": card10, "layout": layout_Stock_activos,    "pos": (1, 0, 1, 1), "tab_key": "Stock"},
+            "purchase_suggestion": {"widget": card_compra, "layout": layout_Stock_activos, "pos": (2, 0, 1, 1), "tab_key": "Stock"},
         }
 
     def create_footer_panel(self):

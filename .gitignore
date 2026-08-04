@@ -24,6 +24,12 @@ version.json.simulado*
 catalogo.json.simulado
 **/Config/instalado.json
 
+# Recursos/Config es la carpeta de cada instalación: nada de lo que la app
+# escriba ahí en tiempo de ejecución va al repo. La carpeta la crea sola
+# `rutas.configurar_logging()`.
+Recursos/Config/*.log
+Recursos/Config/*.log.*
+
 # Comprimidos sueltos que no son fuente de nada
 *.rar
 *.zip

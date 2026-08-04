@@ -7,6 +7,21 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout
 import numpy as np
 import pandas as pd
 
+def _intervalos_de_fecha(dias):
+    """Cada cuántos días poner una marca mayor y una menor en el eje X.
+
+    Matplotlib aborta con "Locator attempting to generate N ticks" si se pasa de
+    1000 marcas. Con un intervalo fijo, un eje de "Todo el Historial" de varios
+    años lo supera: hay que escalar con el rango.
+    """
+    if dias <= 30:
+        return 5, 1
+    if dias <= 90:
+        return 15, 5
+    mayor = max(15, dias // 8)
+    return int(mayor), int(max(5, mayor // 3))
+
+
 class MatplotlibWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -82,9 +97,8 @@ class MatplotlibWidget(QWidget):
             x_data = pd.to_datetime(x_data)
             
         days = (x_data.max() - x_data.min()).days if not x_data.empty else 0
-        
-        if days <= 30: major_interval = 5; minor_interval = 1
-        else: major_interval = 15; minor_interval = 5
+
+        major_interval, minor_interval = _intervalos_de_fecha(days)
 
         ax.xaxis.set_major_locator(mdates.DayLocator(interval=major_interval))
         ax.xaxis.set_minor_locator(mdates.DayLocator(interval=minor_interval))
@@ -117,18 +131,10 @@ class MatplotlibWidget(QWidget):
 
         days = (df.index.max() - df.index.min()).days if not df.empty else 0
 
-        # Calcular dinámicamente para no exceder el límite de Ticks de Matplotlib
-        if days <= 30: 
-            major_interval = 5; minor_interval = 1
-        elif days <= 90: 
-            major_interval = 15; minor_interval = 5
-        else:
-            # Aumentar la escala automáticamente para rangos inmensos
-            major_interval = max(15, days // 8) 
-            minor_interval = max(5, major_interval // 3)
-        
-        ax.xaxis.set_major_locator(mdates.DayLocator(interval=int(major_interval)))
-        ax.xaxis.set_minor_locator(mdates.DayLocator(interval=int(minor_interval)))
+        major_interval, minor_interval = _intervalos_de_fecha(days)
+
+        ax.xaxis.set_major_locator(mdates.DayLocator(interval=major_interval))
+        ax.xaxis.set_minor_locator(mdates.DayLocator(interval=minor_interval))
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%d-%b'))
 
         ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda val, pos: f'${val:,.0f}'))
