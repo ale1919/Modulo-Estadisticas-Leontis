@@ -462,11 +462,26 @@ self.API_BASE_URL = "http://sistema.leontis.com.ar:65081"   # main.py:61  ← HT
 
 1. **Login por HTTP sin TLS.** Base64 no es cifrado: usuario y contraseña viajan
    en claro y son legibles por cualquiera en la red (WiFi del local, ISP).
-   Debe ser `https://`.
+
+   > **Comprobado el 2026-08-04: el servidor NO soporta HTTPS en el puerto
+   > 65081.** Un handshake TLS contra él devuelve `WRONG_VERSION_NUMBER`, que es
+   > la respuesta HTTP en texto plano al `ClientHello`. Cambiar el esquema a
+   > `https://` rompe el login por completo, y así fue como se rompió en la
+   > primera pasada de estas correcciones.
+   >
+   > `Modulo Servicios` y el importador desde Eslaboon usan el mismo `http://`,
+   > así que **esto no se arregla en esta app**: hay que ponerle certificado al
+   > servidor y después migrar los tres módulos. Mientras tanto la app acepta
+   > `ESTADISTICAS_API_URL` para probar el `https://` sin recompilar.
 2. **`main.py:241`** imprime la cadena de conexión decodificada — con host,
    usuario y **contraseña de la base de datos** — a stdout.
 3. **`db_connection.py:144`** vuelve a imprimir la URL completa de SQLAlchemy,
    contraseña incluida.
+4. **La contraseña se inyecta cruda en la URL de SQLAlchemy.** Si trae `@`, `:`,
+   `/` o `#`, la URL se parsea mal y la conexión falla con un error que no dice
+   nada útil. Hay que escaparla con `urllib.parse.quote_plus`. El mismo problema
+   está en `Modulo Servicios/RECURSOS/MODULOS/db_writer.py:10` y en el importador
+   desde Eslaboon; **conviene arreglarlo también ahí**.
 
 En el `.exe` compilado con consola, o si alguien redirige stdout a un log, queda
 la credencial de la BD del cliente en texto plano.
@@ -1292,3 +1307,33 @@ Persistencia de settings, fugas de memoria, código muerto, logging.
 **Etapa 5 — estadísticas nuevas**
 Por valor entregado: §3.1 margen → §3.2 ABC → §3.3 sugerido de compra →
 §3.4 aging → §3.5 inflación → el resto.
+
+---
+
+# 6. Bitácora
+
+## 0.1.0 — primera publicación
+
+Aplicadas las etapas 0 a 4 y los cuatro informes de §3.1 a §3.4.
+
+## 0.1.1 — el login roto
+
+**Qué pasó.** La §2.1 decía "debe ser `https://`" y en 0.1.0 se cambió el esquema
+por defecto. **El servidor no habla TLS en el puerto 65081**, así que el login
+dejó de funcionar para todos. Se detectó recién con la app ya publicada.
+
+**Por qué se escapó.** El cambio se hizo porque el problema de seguridad es real,
+pero no se probó contra el servidor, que era lo único que podía confirmarlo. Que
+`Modulo Servicios` y el importador desde Eslaboon usaran los dos `http://` era la
+pista de que el `https://` no estaba disponible, y estaba a un `grep` de
+distancia.
+
+**La lección, para la próxima.** Un cambio de endpoint, esquema o credenciales
+**se prueba contra el servidor real antes de publicar**, aunque el arreglo sea
+obviamente correcto en abstracto. Y cuando hay varias apps hablando con la misma
+API, lo que hacen las otras es evidencia sobre lo que el servidor soporta.
+
+```bash
+# Lo que había que correr antes de tocar el esquema:
+python -c "import requests; print(requests.post('https://sistema.leontis.com.ar:65081/login', json={}, timeout=10).status_code)"
+```

@@ -69,7 +69,8 @@ class DBManager:
         try:
             if self.db_type in ("MariaDB", "MySQL"):
                 port_str = f":{port}" if port else ":3306"
-                url = f"mysql+pymysql://{user}:{password}@{host}{port_str}"
+                url = (f"mysql+pymysql://{urllib.parse.quote_plus(user)}:"
+                       f"{urllib.parse.quote_plus(password or '')}@{host}{port_str}")
             elif self.db_type == "SQL Server":
                 driver = "ODBC Driver 17 for SQL Server"
                 params = (f"DRIVER={{{driver}}};SERVER={host},{port};DATABASE=master;"
@@ -121,7 +122,8 @@ class DBManager:
         try:
             if self.db_type in ("MariaDB", "MySQL"):
                 port_str = f":{port}" if port else ":3306"
-                url = f"mysql+pymysql://{user}:{password}@{host}{port_str}/{db_name}"
+                url = (f"mysql+pymysql://{urllib.parse.quote_plus(user)}:"
+                       f"{urllib.parse.quote_plus(password or '')}@{host}{port_str}/{db_name}")
             elif self.db_type == "SQL Server":
                 driver = "ODBC Driver 17 for SQL Server"
                 params = (f"DRIVER={{{driver}}};SERVER={host},{port};DATABASE={db_name};"
@@ -162,8 +164,13 @@ class DBManager:
             if not host or not user or not database:
                 return False, "La cadena de conexión de la API está incompleta."
 
+            # Usuario y contraseña van escapados: si la contraseña trae '@', ':',
+            # '/' o '#' —cosa que pasa— la URL se parsea mal y la conexión falla
+            # con un error que no dice nada útil.
             sqlalchemy_url = (
-                f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}"
+                f"mysql+pymysql://{urllib.parse.quote_plus(user)}:"
+                f"{urllib.parse.quote_plus(password or '')}"
+                f"@{host}:{port}/{database}"
                 "?charset=utf8mb4"
             )
 

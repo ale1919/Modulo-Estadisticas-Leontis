@@ -95,9 +95,12 @@ Funcional y publicado en MINIhub (`ModuloEstadisticasLeontis`).
 
 Pendientes conocidos, todos anotados en [`AUDITORIA.md`](AUDITORIA.md):
 
-- La API de login se apunta a `https://`, pero **hay que confirmar que el servidor
-  tenga certificado**. Si no, se puede forzar el `http://` con la variable
-  `ESTADISTICAS_API_URL` — como salida transitoria, no como solución.
+- **El login va por `http://` porque el servidor no habla TLS en el puerto 65081**
+  (un handshake devuelve `WRONG_VERSION_NUMBER`). Es lo mismo que hacen
+  `Modulo Servicios` y el importador desde Eslaboon. Sigue siendo un problema
+  real: por ahí viajan usuario, contraseña y la cadena de conexión a la base del
+  cliente, y Base64 no cifra nada. Cuando el servidor tenga certificado se prueba
+  con `ESTADISTICAS_API_URL=https://...` y recién ahí se cambia el default.
 - Los informes corren en el hilo de la GUI: en bases grandes la ventana se
   congela. Está la infraestructura (`DashboardWorker`) para generalizarlo.
 - Faltan los índices SQL de la §4 de la auditoría; hay que coordinarlos con quien

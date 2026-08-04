@@ -46,13 +46,18 @@ class LoginDialog(QDialog):
         self.valid_user_role = None
         
         self.db_manager = DBManager()
-        # HTTPS: por acá viajan el usuario, la contraseña y —de vuelta— la cadena
-        # de conexión a la base del cliente. Base64 no cifra nada: sobre HTTP
-        # plano todo eso es legible en la red del local.
-        # Si el servidor todavía no tiene certificado, poner ESTADISTICAS_API_URL
-        # con el http:// como salida transitoria, pero hay que resolverlo.
+        # HTTP, no HTTPS: el servidor NO habla TLS en este puerto. Un handshake
+        # contra él devuelve WRONG_VERSION_NUMBER, que es lo que pasa cuando del
+        # otro lado hay HTTP plano. Es lo mismo que usan los módulos hermanos
+        # (`Modulo Servicios` y el importador desde Eslaboon).
+        #
+        # Queda pendiente y es un problema real de seguridad: por acá viajan el
+        # usuario, la contraseña y —de vuelta— la cadena de conexión a la base
+        # del cliente. Base64 no cifra nada, así que todo eso es legible para
+        # cualquiera en la red del local. Cuando el servidor tenga certificado,
+        # se pasa a https con ESTADISTICAS_API_URL y después se cambia el default.
         self.API_BASE_URL = os.environ.get(
-            "ESTADISTICAS_API_URL", "https://sistema.leontis.com.ar:65081")
+            "ESTADISTICAS_API_URL", "http://sistema.leontis.com.ar:65081")
 
         self.init_ui()
         self.connect_signals()
