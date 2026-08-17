@@ -63,7 +63,6 @@ import os
 import subprocess
 import sys
 import tempfile
-from ctypes import wintypes
 from pathlib import Path
 
 from . import nucleo
@@ -415,10 +414,7 @@ class ResultadoInstalacion:
 
 
 def es_administrador():
-    try:
-        return bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except Exception:
-        return False
+    return nucleo.es_administrador()
 
 
 def instalar(req, ruta_instalador_local, elevar=True):
@@ -447,7 +443,7 @@ def instalar(req, ruta_instalador_local, elevar=True):
                 [str(ruta_instalador_local), *args],
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             ).returncode
-    except PermissionError:
+    except (PermissionError, nucleo.ElevacionCancelada):
         return ResultadoInstalacion("cancelado", None, "el UAC se rechazó")
     except Exception as e:
         return ResultadoInstalacion("error", None, str(e))
@@ -490,73 +486,8 @@ def abrir_para_instalar_a_mano(req, ruta_instalador_local=None):
 
 
 # --- Elevación ---
-class _SHELLEXECUTEINFOW(ctypes.Structure):
-    _fields_ = [
-        ("cbSize", wintypes.DWORD),
-        ("fMask", ctypes.c_ulong),
-        ("hwnd", wintypes.HWND),
-        ("lpVerb", wintypes.LPCWSTR),
-        ("lpFile", wintypes.LPCWSTR),
-        ("lpParameters", wintypes.LPCWSTR),
-        ("lpDirectory", wintypes.LPCWSTR),
-        ("nShow", ctypes.c_int),
-        ("hInstApp", wintypes.HINSTANCE),
-        ("lpIDList", ctypes.c_void_p),
-        ("lpClass", wintypes.LPCWSTR),
-        ("hkeyClass", wintypes.HKEY),
-        ("dwHotKey", wintypes.DWORD),
-        ("hIcon", wintypes.HANDLE),
-        ("hProcess", wintypes.HANDLE),
-    ]
-
-
-_SEE_MASK_NOCLOSEPROCESS = 0x00000040
-_SEE_MASK_NOASYNC = 0x00000100
-_SW_HIDE = 0
-_INFINITO = 0xFFFFFFFF
-_ERROR_CANCELLED = 1223
-
-
-def _correr_elevado(exe, args):
-    """Lanza el instalador con el verbo `runas` (UAC) y espera a que termine.
-
-    Se usa `ShellExecuteExW` y no `ShellExecuteW` porque el segundo no devuelve
-    un handle del proceso y no habría forma de esperarlo ni de leer su código de
-    salida — y sin eso no se sabe si el requisito quedó instalado.
-
-    `SEE_MASK_NOASYNC` es obligatorio acá: sin él la llamada puede volver antes
-    de que el shell haya terminado de arrancar el proceso, y este hilo (que no
-    bombea mensajes, corre en un QThread) se quedaría con un handle inválido.
-    """
-    info = _SHELLEXECUTEINFOW()
-    info.cbSize = ctypes.sizeof(info)
-    info.fMask = _SEE_MASK_NOCLOSEPROCESS | _SEE_MASK_NOASYNC
-    info.lpVerb = "runas"
-    info.lpFile = str(exe)
-    info.lpParameters = subprocess.list2cmdline(args)
-    info.nShow = _SW_HIDE
-
-    # `use_last_error=True` no es un detalle: sin eso `ctypes.get_last_error()`
-    # devuelve siempre 0, porque ctypes solo guarda el GetLastError del sistema
-    # cuando se le pide. Sin él no se podría distinguir "el usuario dijo que no
-    # al UAC" (1223, que es normal y no hay que reportar como falla) de un error
-    # de verdad.
-    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
-    if not shell32.ShellExecuteExW(ctypes.byref(info)):
-        error = ctypes.get_last_error()
-        if error == _ERROR_CANCELLED:
-            raise PermissionError("el usuario rechazó el UAC")
-        raise OSError(f"no se pudo lanzar el instalador (error {error})")
-
-    if not info.hProcess:
-        raise OSError("el instalador se lanzó pero no devolvió un proceso")
-
-    try:
-        ctypes.windll.kernel32.WaitForSingleObject(info.hProcess, _INFINITO)
-        salida = wintypes.DWORD()
-        ctypes.windll.kernel32.GetExitCodeProcess(
-            info.hProcess, ctypes.byref(salida)
-        )
-        return int(salida.value)
-    finally:
-        ctypes.windll.kernel32.CloseHandle(info.hProcess)
+# Vive en `nucleo` y no acá: MINIhub también necesita elevar y esperar (para
+# abrirle `C:\MainSolution` al grupo Usuarios), y `nucleo` es el piso de abajo,
+# el que puede importar todo el mundo. Se deja el nombre viejo para no repetir
+# el `try/except` de `instalar()` en dos formas distintas.
+_correr_elevado = nucleo.correr_elevado

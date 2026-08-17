@@ -54,11 +54,17 @@ mostrar el estado de todas juntas y crear los accesos directos. **Las dos cosas
 tienen que existir**: la gente abre el `.exe` desde un acceso directo sin pasar por
 MINIhub, así que una app que no se autoactualiza se queda con código viejo.
 
+Las apps se instalan en `C:\MainSolution\<App>\`, al lado de los sistemas de
+gestión: una ruta igual en todas las PC, escribible sin ser administrador y fuera
+de OneDrive (la sincronización pelea con el renombrado de archivos y puede dejar el
+build hecho de mitades de dos versiones).
+
 Además, al arrancar cada app se **anota a sí misma** en
-`%LOCALAPPDATA%\UtilidadesMINI\instalaciones.json`: dónde está y qué
-`APP_VERSION` tiene. Eso es lo que hace que MINIhub encuentre una copia que él no
-instaló (las que se repartieron a mano viven en el escritorio, en `D:`, donde sea) y
-la actualice **en su lugar** en vez de poner una segunda al lado. Lo hace
+`%LOCALAPPDATA%\UtilidadesMINI\instalaciones.json` —eso sigue siendo por usuario,
+a propósito—: dónde está y qué `APP_VERSION` tiene. Eso es lo que hace que MINIhub
+encuentre una copia que él no instaló (las que se repartieron a mano viven en el
+escritorio, en `D:`, donde sea) y la actualice **en su lugar** en vez de poner una
+segunda al lado. Lo hace
 `chequear_al_inicio()`, así que sale gratis con solo integrarlo — **salvo que
 tengas que forkear `ui_updater.py`**, en cuyo caso el fork también tiene que llamar
 a `nucleo.registrar_ubicacion()`.
@@ -84,7 +90,7 @@ código en toda la oficina.
 | Ejecutable esperado | `ModuloEstadisticasLeontis.exe` |
 | Carpeta intocable | `Recursos/Config` |
 | Repo | `https://github.com/ale1919/Modulo-Estadisticas-Leontis` |
-| Se instala en | `%LOCALAPPDATA%\UtilidadesMINI\ModuloEstadisticasLeontis\` |
+| Se instala en | `C:\MainSolution\ModuloEstadisticasLeontis\` |
 
 El **ejecutable esperado** es lo que dice el catálogo y no es negociable sin tocarlo:
 `publicar_app.py` verifica que ese archivo exista de verdad en el build antes de
@@ -243,6 +249,40 @@ build para que `publicar_app.py --compilar` funcione:
 Si esta app compila con un `.bat`, poné el `.bat`:
 `"compilar": ["cmd", "/c", "compila.bat"]`.
 
+### 9. `CHANGELOG.md`
+
+Creá un `CHANGELOG.md` en la raíz de esta app (`C:\Users\alema\OneDrive\Escritorio\PROYECTOS 8-10\LEONTIS\ESTADISTICAS LEONTIS - USUARIO FINAL`). MINIhub lo muestra en
+el botón **Changelog** de la tarjeta de Módulo de Estadísticas: es lo que el técnico lee para
+saber qué cambió antes de actualizar.
+
+Lo lee `publicar_app.py` de la carpeta del proyecto y lo mete **dentro del
+manifiesto firmado**, así que no hay que agregarlo a los `datas` del `.spec` ni
+publicarlo aparte: no es un archivo del build, es documentación del repo.
+
+Arrancá con esto:
+
+```markdown
+# Changelog — Módulo de Estadísticas
+
+Qué cambió en cada versión. Lo lee el técnico desde MINIhub.
+
+## 0.1.0 — AAAA-MM-DD
+
+Primera versión publicada en el sistema de actualización de MINIhub.
+```
+
+Dos cosas, las dos importan:
+
+- **Escribí para el que usa el programa, no para el que lo programó.** "Ya no se
+  cuelga al importar un Excel con celdas combinadas" sirve; "refactor de
+  `importador.py`" no le dice nada a nadie.
+- **Una sección por versión publicada, la más nueva arriba.** Va el archivo
+  entero en cada publicación, así que se ve el historial completo, no solo lo
+  último.
+
+Si no lo creás, la app se publica igual: MINIhub muestra las notas de la versión
+(el `--notas` de la publicación) y avisa que esta app todavía no tiene changelog.
+
 ---
 
 ## Verificación (antes de publicar)
@@ -295,8 +335,10 @@ Desde `MINIhub/`, **primero simulando**:
 python publicar_app.py --app ModuloEstadisticasLeontis --version 0.1.0 --notas "Primera publicacion." --simular
 ```
 
-Revisá lo que imprime: cantidad de archivos, peso, y sobre todo que **no aparezca
-nada de la carpeta intocable** en el manifiesto (`version.json.simulado.ModuloEstadisticasLeontis`).
+Revisá lo que imprime: cantidad de archivos, peso, que **no aparezca nada de la
+carpeta intocable** en el manifiesto (`version.json.simulado.ModuloEstadisticasLeontis`) y que el
+`CHANGELOG.md` se haya leído (lo dice con la cantidad de caracteres; si no lo
+encuentra, avisa).
 
 Si está bien:
 

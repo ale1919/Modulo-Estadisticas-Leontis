@@ -33,6 +33,12 @@ from . import nucleo, requisitos
 from .version import APP_NAME
 
 
+# Lo mismo que en `ui_updater`, y por lo mismo: 800 ms alcanzaba para que el
+# diálogo apareciera y se fuera solo en un arranque normal. Ver el comentario de
+# `MS_ANTES_DE_MOSTRAR` allá.
+MS_ANTES_DE_MOSTRAR = 2500
+
+
 def fmt_bytes(n):
     if n <= 0:
         return "0 MB"
@@ -230,7 +236,10 @@ class DialogoRequisitos(QDialog):
 
     def iniciar(self):
         self.hilo.start()
-        QTimer.singleShot(800, self._mostrar_si_sigue)
+        # Con ventana detrás no se anuncia el chequeo: si falta algo, el diálogo
+        # sale igual desde `_on_faltan`. Ver `ui_updater.iniciar`.
+        if self.parent() is None:
+            QTimer.singleShot(MS_ANTES_DE_MOSTRAR, self._mostrar_si_sigue)
 
     def _mostrar_si_sigue(self):
         if not self.terminado and not self.isVisible():

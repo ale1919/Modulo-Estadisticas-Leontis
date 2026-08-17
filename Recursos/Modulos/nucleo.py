@@ -67,6 +67,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from cryptography.exceptions import InvalidSignature
@@ -95,6 +96,18 @@ NOMBRE_INSTALADO = "instalado.json"
 # Corto a propósito: si el FTP no está, nadie tiene que esperar para entrar.
 TIMEOUT_FTP = 12
 TIMEOUT_FTP_SUBIDA = 120
+
+# Bajar objetos es otra cosa que leer un manifiesto. Son cientos de MB en miles
+# de archivos y el timeout se mide entre bloques: con 12 segundos alcanza con un
+# hipo de la red o con el FTP atendiendo a otro para que la instalación entera se
+# caiga a la mitad. Acá esperar no molesta a nadie, porque ya hay un diálogo con
+# barra de progreso y botón de cancelar.
+TIMEOUT_FTP_DESCARGA = 90
+
+# Un objeto que falla se reintenta antes de dar por perdida toda la instalación.
+# Un corte de red de dos segundos no puede costar 300 MB de descarga.
+REINTENTOS_OBJETO = 3
+ESPERA_REINTENTO = 2
 
 
 # ==========================================
@@ -374,14 +387,7 @@ class Instalacion:
     def escribible(self):
         """True si podemos escribir en la carpeta (falla en Program Files sin
         permisos de administrador)."""
-        try:
-            self.carpeta.mkdir(parents=True, exist_ok=True)
-            prueba = self.carpeta / f".permiso-{os.getpid()}.tmp"
-            prueba.write_bytes(b"")
-            prueba.unlink()
-            return True
-        except OSError:
-            return False
+        return escribible(self.carpeta)
 
     def en_onedrive(self):
         """La sincronización de OneDrive pelea con el renombrado de archivos y
@@ -511,6 +517,12 @@ class Instalacion:
         `progreso_cb(bytes_hechos, bytes_totales)` se llama tras cada bloque.
         `cancelar_cb()` se consulta seguido: si devuelve True se aborta.
         Cada objeto se verifica contra su SHA-256 y si no coincide se descarta.
+
+        Un objeto que falla se reintenta con una conexión nueva antes de darse por
+        vencido: una instalación son miles de objetos y un corte de red de dos
+        segundos en cualquiera de ellos tiraba abajo la descarga entera. Lo que sí
+        se bajó queda en el staging, así que reintentar desde la ventana sigue
+        desde donde iba (ver `limpiar_rastros` y `podar_staging`).
         """
         if not plan.a_bajar:
             return
@@ -518,8 +530,8 @@ class Instalacion:
         total = plan.bytes_a_bajar
         hechos = 0
 
-        propia = sesion is None
-        s = sesion or Sesion()
+        nuestra = sesion is None
+        s = sesion or Sesion(timeout=TIMEOUT_FTP_DESCARGA)
         try:
             for sha, tam in plan.a_bajar.items():
                 if cancelar_cb and cancelar_cb():
@@ -535,35 +547,64 @@ class Instalacion:
                     continue
 
                 parcial = destino.with_suffix(".parcial")
-                with open(parcial, "wb") as f:
-                    def _escribir(bloque):
-                        nonlocal hechos
-                        if cancelar_cb and cancelar_cb():
-                            raise ActualizacionCancelada()
-                        f.write(bloque)
-                        hechos += len(bloque)
-                        if progreso_cb:
-                            progreso_cb(hechos, total)
+                # De acá arranca cada intento: sin esto, un reintento seguiría
+                # sumando sobre lo que ya contó el intento que se cortó y la barra
+                # de progreso pasaría del total.
+                base = hechos
+                ultimo_error = None
 
+                for intento in range(1, REINTENTOS_OBJETO + 1):
+                    hechos = base
                     try:
-                        s.ftp.retrbinary(
-                            f"RETR {ruta_objeto(sha)}", _escribir, blocksize=131072
-                        )
+                        with open(parcial, "wb") as f:
+                            def _escribir(bloque):
+                                nonlocal hechos
+                                if cancelar_cb and cancelar_cb():
+                                    raise ActualizacionCancelada()
+                                f.write(bloque)
+                                hechos += len(bloque)
+                                if progreso_cb:
+                                    progreso_cb(hechos, total)
+
+                            s.ftp.retrbinary(
+                                f"RETR {ruta_objeto(sha)}", _escribir, blocksize=131072
+                            )
+                        if sha256_archivo(parcial) != sha:
+                            # Casi siempre es una transferencia que llegó cortada,
+                            # así que también se reintenta: el nombre del objeto
+                            # **es** su verificación, no hay forma de colar nada.
+                            raise RuntimeError(
+                                f"el objeto {sha[:12]}… llegó corrupto "
+                                "(hash distinto al del manifiesto)"
+                            )
                     except ActualizacionCancelada:
                         raise
                     except Exception as e:
-                        raise RuntimeError(f"no se pudo bajar {sha[:12]}…: {e}") from e
+                        parcial.unlink(missing_ok=True)
+                        ultimo_error = e
+                        if intento == REINTENTOS_OBJETO:
+                            break
+                        try:
+                            s = _reconectar(s)
+                        except Exception:
+                            # El FTP no vuelve: no tiene sentido gastar el intento
+                            # que queda, y el error que importa es el primero.
+                            break
+                        nuestra = True
+                        continue
+                    ultimo_error = None
+                    break
 
-                if sha256_archivo(parcial) != sha:
-                    parcial.unlink(missing_ok=True)
+                if ultimo_error is not None:
                     raise RuntimeError(
-                        f"el objeto {sha[:12]}… llegó corrupto "
-                        "(hash distinto al del manifiesto)"
-                    )
+                        f"no se pudo bajar {sha[:12]}… "
+                        f"(se intentó {REINTENTOS_OBJETO} veces): {ultimo_error}"
+                    ) from ultimo_error
+
                 os.replace(parcial, destino)
                 plan.verificados.add(sha)
         finally:
-            if propia:
+            if nuestra:
                 s.cerrar()
 
     # --- Aplicación ---
@@ -685,6 +726,10 @@ class Instalacion:
             "app": manifiesto.get("app"),
             "version": manifiesto.get("version"),
             "fecha": manifiesto.get("fecha"),
+            # Se copian para que MINIhub pueda mostrar el historial de cambios
+            # sin FTP. Son texto y pesan nada al lado de la lista de archivos.
+            "notas": manifiesto.get("notas", ""),
+            "changelog": manifiesto.get("changelog", ""),
             "archivos": [
                 {"ruta": e.get("ruta"), "sha256": e.get("sha256"), "tam": e.get("tam")}
                 for e in manifiesto.get("archivos", [])
@@ -700,11 +745,18 @@ class Instalacion:
             pass
 
     # --- Limpieza ---
-    def limpiar_rastros(self):
-        """Borra los `.viejo-*` y el staging de una actualización anterior.
+    def limpiar_rastros(self, incluir_staging=True):
+        """Borra los `.viejo-*` y, si se pide, el staging de un intento anterior.
 
         Se llama al arrancar, cuando el proceso que tenía esos archivos abiertos
         ya murió. Todo error se ignora: son archivos de descarte.
+
+        `incluir_staging=False` es para **antes de reintentar una instalación**.
+        Lo que hay en el staging son objetos ya bajados y verificados por hash: si
+        una descarga de 300 MB se cortó en el último archivo, borrarlos obliga a
+        bajar los 300 MB otra vez para tropezar con el mismo corte. Lo que sobre
+        de una versión que ya no se va a instalar lo saca `podar_staging()`, que
+        corre después de armar el plan y sabe qué hace falta de verdad.
         """
         try:
             for ruta in self.carpeta.rglob("*" + SUFIJO_VIEJO + "*"):
@@ -715,7 +767,38 @@ class Instalacion:
                     pass
         except OSError:
             pass
-        shutil.rmtree(self.staging, ignore_errors=True)
+        if incluir_staging:
+            shutil.rmtree(self.staging, ignore_errors=True)
+
+    def podar_staging(self, plan):
+        """Saca del staging los objetos que este plan no va a usar.
+
+        La contracara de conservar el staging entre intentos: un intento
+        abandonado (o una versión que se publicó de nuevo mientras tanto) deja
+        objetos que ya no le sirven a nadie.
+
+        Solo toca archivos con nombre de hash. En el staging también puede haber
+        un `terminar_update.cmd` esperando a que este proceso cierre para
+        completar un reemplazo (ver `lanzar_ayudante`), y borrarlo dejaría la app
+        a medio actualizar.
+        """
+        if not self.staging.is_dir():
+            return
+        necesarios = {e["sha256"] for e in plan.entradas}
+        try:
+            hijos = list(self.staging.iterdir())
+        except OSError:
+            return
+        for hijo in hijos:
+            nombre = hijo.name
+            if nombre.endswith(".parcial"):
+                nombre = nombre[: -len(".parcial")]
+            if not _es_sha(nombre) or nombre in necesarios:
+                continue
+            try:
+                hijo.unlink()
+            except OSError:
+                pass
 
     def lanzar_ayudante(self, pendientes, relanzar=None):
         """Deja un `.cmd` que termina el reemplazo cuando este proceso cierre.
@@ -756,6 +839,22 @@ class Instalacion:
             return True
         except OSError:
             return False
+
+
+def _reconectar(sesion):
+    """Descarta una conexión que falló a mitad de una descarga y abre otra.
+
+    No se reintenta sobre la misma: un `retrbinary` que se corta por timeout deja
+    el canal de control con una respuesta a medio leer, y el objeto siguiente
+    falla igual aunque la red ya haya vuelto. Sale más barato tirar la conexión
+    que intentar destrabarla.
+    """
+    try:
+        sesion.cerrar()
+    except Exception:
+        pass
+    time.sleep(ESPERA_REINTENTO)
+    return Sesion(timeout=TIMEOUT_FTP_DESCARGA)
 
 
 def _indice_de(carpeta):
@@ -823,22 +922,523 @@ def _colocar(origen, destino, mover):
 # ==========================================
 # ENTORNO
 # ==========================================
-def raiz_instalaciones():
-    """Dónde MINIhub instala las apps.
+# Todo cuelga de `C:\MainSolution`, para que el técnico encuentre las cosas sin
+# que nadie le explique dónde mirar:
+#
+# - `raiz_instalaciones()`: las APPS, en `C:\MainSolution\<App>`. Carpeta
+#   compartida y escribible por cualquier usuario de la PC, a propósito:
+#   instalar una app la puede hacer cualquiera y la copia es una sola.
+# - `carpeta_datos()`: lo que se sabe de ESTA PC y ESTE usuario
+#   (`instalaciones.json`, y en MINIhub además `novedades.json` y
+#   `minihub_ui.json`), en `C:\MainSolution\MINIhub\usuarios\<usuario>`.
+#
+# **Las dos están abajo del mismo árbol pero no tienen los mismos permisos, y esa
+# diferencia es de seguridad, no de orden.** De `instalaciones.json` sale la
+# carpeta donde MINIhub después escribe y a la que apunta el acceso directo que
+# crea: en un archivo que pudiera editar cualquiera, otro usuario apuntaría una
+# app a una carpeta suya con un `.exe` suyo y se lo haría ejecutar al primero que
+# abriera el acceso directo —elevado, si la app pide administrador—. Por eso la
+# carpeta de datos de cada usuario se cierra a ese usuario (ver
+# `_resolver_carpeta_datos`), y si no se puede cerrar se cae a
+# `%LOCALAPPDATA%\UtilidadesMINI`, que es privado por definición.
+#
+# Es la misma regla que la firma de los manifiestos, un piso más abajo: nada que
+# no controlemos dispara una escritura o una ejecución.
+NOMBRE_RAIZ = "MainSolution"
+NOMBRE_DATOS = "UtilidadesMINI"
 
-    `%LOCALAPPDATA%` cumple las dos condiciones que hacen fallar una
-    actualización: es escribible sin permisos de administrador (en
-    `Program Files` el update falla) y está fuera de OneDrive (la sincronización
-    pelea con el renombrado y puede dejar el build hecho de mitades de dos
-    versiones).
+# Dentro de la raíz: `C:\MainSolution\MINIhub\usuarios\<usuario>\`. El nivel
+# `usuarios` existe porque el dato ES por usuario —dónde tiene cada uno sus apps,
+# qué plegó, qué novedades vio— y porque así cada carpeta puede tener permisos
+# propios sin tocar los de la de al lado.
+CARPETA_HUB = "MINIhub"
+CARPETA_USUARIOS = "usuarios"
+
+# Permite mover la carpeta de datos sin recompilar. La usan las pruebas, que no
+# pueden andar escribiendo en la carpeta real del usuario.
+VAR_DATOS = "MINI_CARPETA_DATOS"
+
+# Se resuelve una vez por proceso (ver `carpeta_datos`).
+_CARPETA_DATOS = None
+
+# Permite mover la raíz sin recompilar. Hoy la usan las pruebas; es también el
+# punto por donde va a entrar el panel de preferencias que viene ("¿ubicación por
+# defecto o elegir dónde?"): cuando exista, `raiz_instalaciones()` es lo único
+# que hay que tocar.
+VAR_RAIZ = "MINI_RAIZ_INSTALACIONES"
+
+
+def raiz_instalaciones():
+    """Dónde MINIhub instala las apps: `C:\\MainSolution`.
+
+    Cumple las tres condiciones que hacen fallar una actualización o una
+    explicación por teléfono:
+
+    - **Fuera de OneDrive.** La sincronización pelea con el renombrado de
+      archivos y puede dejar el build hecho de mitades de dos versiones.
+    - **Fuera de `Program Files`**, donde escribir pide elevación en cada
+      actualización, no solo al instalar.
+    - **La misma ruta en todas las PC y para todos los usuarios**, que es lo que
+      `%LOCALAPPDATA%` no daba: ahí cada cuenta tenía su copia de 130 MB por app
+      y la ruta cambiaba con el nombre de usuario.
+
+    La raíz de `C:` no es escribible por cualquiera de entrada: la carpeta la crea
+    `preparar_raiz()`, una vez, y le abre el permiso al grupo Usuarios.
+
+    Lo que ya está instalado en otro lado (las copias en `%LOCALAPPDATA%` de antes
+    de este cambio, o las repartidas a mano) **no se mueve**: el registro de
+    ubicaciones las encuentra y se actualizan donde están.
+    """
+    forzada = (os.environ.get(VAR_RAIZ) or "").strip()
+    if forzada:
+        return Path(forzada).expanduser()
+    if os.name != "nt":
+        return Path(os.path.expanduser("~")) / NOMBRE_RAIZ
+    # `Path("C:") / x` da una ruta relativa a la unidad (`C:MainSolution`), que
+    # no es lo mismo que `C:\MainSolution`. La barra no es opcional.
+    unidad = (os.environ.get("SystemDrive") or "C:").rstrip("\\/")
+    return Path(unidad + "\\") / NOMBRE_RAIZ
+
+
+def carpeta_datos():
+    """Dónde va lo que sabemos de esta PC y este usuario.
+
+    `C:\\MainSolution\\MINIhub\\usuarios\\<usuario>\\`, para que el técnico
+    encuentre todo junto en vez de tener que ir a una carpeta oculta del perfil.
+
+    **Por usuario y con permisos propios, no suelto en la carpeta compartida.**
+    De `instalaciones.json` sale la ruta donde MINIhub después escribe y a la que
+    apunta el acceso directo que crea. En una carpeta que pueda escribir
+    cualquiera, otro usuario de la misma PC podría apuntar una app a una carpeta
+    suya, dejar ahí su propio `.exe` y hacérselo ejecutar al primero que abra el
+    acceso directo —con elevación, si la app es de las que piden administrador—.
+    Es la misma regla que rige todo lo demás: nada que no controlemos dispara una
+    escritura o una ejecución.
+
+    Si por lo que sea la carpeta no se puede dejar cerrada (una PC endurecida por
+    directiva, o alguien que la creó antes con permisos abiertos), se cae al
+    `%LOCALAPPDATA%\\UtilidadesMINI` de siempre, que es privado por definición.
+    Perder la comodidad es aceptable; aflojar el permiso no.
+
+    El resultado se calcula una vez por proceso: verificar permisos cuesta, y
+    esto se llama en cada lectura del registro.
+    """
+    global _CARPETA_DATOS
+    if _CARPETA_DATOS is None:
+        _CARPETA_DATOS = _resolver_carpeta_datos()
+    return _CARPETA_DATOS
+
+
+def carpeta_datos_legado():
+    """La de antes: `%LOCALAPPDATA%\\UtilidadesMINI`.
+
+    Sigue siendo el respaldo cuando la carpeta compartida no se puede dejar
+    cerrada, y es de donde se migra lo que ya había.
     """
     base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    return Path(base) / "UtilidadesMINI"
+    return Path(base) / NOMBRE_DATOS
+
+
+# SIDs de los grupos que abarcan "cualquier otro usuario de esta PC". Van por SID
+# y no por nombre por lo mismo que en `SID_USUARIOS`: "Usuarios"/"Users" cambia
+# con el idioma de Windows.
+SIDS_AMPLIOS = (
+    "S-1-1-0",       # Todos / Everyone
+    "S-1-5-32-545",  # Usuarios / Users
+    "S-1-5-11",      # Usuarios autentificados
+    "S-1-5-4",       # INTERACTIVE
+)
+
+# Derechos que alcanzan para hacer daño: escribir el archivo, agregarle cosas,
+# borrarlo o cambiarle los permisos a la carpeta.
+ESCRITURA = 0x0002 | 0x0004 | 0x00010000 | 0x00040000 | 0x00080000
+
+
+def carpeta_privada(carpeta):
+    """True si **ningún grupo amplio** puede escribir en `carpeta`.
+
+    Le pregunta a Windows por los derechos efectivos, que es lo único que
+    contesta bien: los permisos son herencia, ACL, negaciones y pertenencia a
+    grupos a la vez, y mirar las ACE una por una se equivoca.
+
+    Fuera de Windows, o si no se puede averiguar, devuelve False. "No sé" tiene
+    que valer lo mismo que "no": el resultado decide si se confía en un archivo
+    del que sale una ruta donde después se escribe.
+    """
+    if os.name != "nt" or not Path(carpeta).is_dir():
+        return False
+    for sid in SIDS_AMPLIOS:
+        derechos = _derechos_efectivos(carpeta, sid)
+        if derechos is None or derechos & ESCRITURA:
+            return False
+    return True
+
+
+def _derechos_efectivos(carpeta, sid_texto):
+    """Máscara de acceso que tiene `sid_texto` sobre `carpeta`, o None.
+
+    `GetEffectiveRightsFromAclW` es el que resuelve la ACL entera —herencia,
+    permisos denegados, orden de las ACE— y contesta qué puede hacer ese usuario
+    o grupo de verdad.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class TRUSTEE_W(ctypes.Structure):
+        _fields_ = [
+            ("pMultipleTrustee", ctypes.c_void_p),
+            ("MultipleTrusteeOperation", ctypes.c_int),
+            ("TrusteeForm", ctypes.c_int),
+            ("TrusteeType", ctypes.c_int),
+            ("ptstrName", ctypes.c_void_p),
+        ]
+
+    SE_FILE_OBJECT = 1
+    DACL_SECURITY_INFORMATION = 0x00000004
+    TRUSTEE_IS_SID = 0
+    TRUSTEE_IS_UNKNOWN = 0
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    advapi32.ConvertStringSidToSidW.argtypes = [wintypes.LPCWSTR,
+                                                ctypes.POINTER(ctypes.c_void_p)]
+    advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi32.GetEffectiveRightsFromAclW.restype = wintypes.DWORD
+
+    psid = ctypes.c_void_p()
+    if not advapi32.ConvertStringSidToSidW(sid_texto, ctypes.byref(psid)):
+        return None
+
+    pdacl = ctypes.c_void_p()
+    pseguridad = ctypes.c_void_p()
+    try:
+        error = advapi32.GetNamedSecurityInfoW(
+            ctypes.c_wchar_p(str(carpeta)), SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION, None, None,
+            ctypes.byref(pdacl), None, ctypes.byref(pseguridad),
+        )
+        if error != 0:
+            return None
+        if not pdacl:
+            # DACL nula: en Windows eso significa acceso total para todos.
+            return 0xFFFFFFFF
+
+        mascara = wintypes.DWORD()
+        trustee = TRUSTEE_W()
+        trustee.TrusteeForm = TRUSTEE_IS_SID
+        trustee.TrusteeType = TRUSTEE_IS_UNKNOWN
+        trustee.ptstrName = psid
+        error = advapi32.GetEffectiveRightsFromAclW(
+            pdacl, ctypes.byref(trustee), ctypes.byref(mascara)
+        )
+        return None if error != 0 else int(mascara.value)
+    finally:
+        if pseguridad:
+            kernel32.LocalFree(pseguridad)
+        if psid:
+            kernel32.LocalFree(psid)
+
+
+def _cerrar_carpeta(carpeta):
+    """Deja `carpeta` accesible solo para su dueño, Administradores y SYSTEM.
+
+    `/inheritance:r` es el punto: sin eso la carpeta sigue heredando de
+    `C:\\MainSolution`, que es escribible por todos los usuarios de la PC a
+    propósito (ahí van las apps, que las instala cualquiera).
+
+    **No pide elevación**: al crear una carpeta uno queda como su dueño, y el
+    dueño siempre puede cambiarle los permisos. Por eso también la crea el propio
+    proceso y no se acepta una que ya estuviera: si la hizo otro, es de otro.
+    """
+    if os.name != "nt":
+        return False
+    ruta = str(carpeta).replace("'", "''")
+    comando = (
+        f"icacls '{ruta}' /inheritance:r "
+        f"/grant '*{_sid_propio()}:(OI)(CI)F' "
+        "/grant '*S-1-5-32-544:(OI)(CI)F' "     # Administradores
+        "/grant '*S-1-5-18:(OI)(CI)F' "         # SYSTEM
+        "| Out-Null; exit $LASTEXITCODE"
+    )
+    try:
+        return subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", comando],
+            capture_output=True, text=True, timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        ).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _sid_propio():
+    """El SID del usuario que corre este proceso, en texto."""
+    import ctypes
+    from ctypes import wintypes
+
+    TOKEN_QUERY = 0x0008
+    TokenUser = 1
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    # Los argtypes no son decoración: sin ellos `GetCurrentProcess()` vuelve como
+    # entero de 32 bits y el pseudo-handle -1 llega truncado a `OpenProcessToken`,
+    # que falla con "handle no válido" en un Windows de 64 bits.
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    advapi32.OpenProcessToken.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE),
+    ]
+    advapi32.GetTokenInformation.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.ConvertSidToStringSidW.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR),
+    ]
+
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(
+        kernel32.GetCurrentProcess(), TOKEN_QUERY, ctypes.byref(token)
+    ):
+        raise OSError("no se pudo leer el token del proceso")
+    try:
+        largo = wintypes.DWORD()
+        advapi32.GetTokenInformation(token, TokenUser, None, 0,
+                                     ctypes.byref(largo))
+        buffer = ctypes.create_string_buffer(largo.value)
+        if not advapi32.GetTokenInformation(token, TokenUser, buffer,
+                                            largo, ctypes.byref(largo)):
+            raise OSError("no se pudo leer el usuario del token")
+        # TOKEN_USER es un SID_AND_ATTRIBUTES: el puntero al SID va primero.
+        psid = ctypes.c_void_p.from_buffer(buffer).value
+        texto = wintypes.LPWSTR()
+        if not advapi32.ConvertSidToStringSidW(ctypes.c_void_p(psid),
+                                               ctypes.byref(texto)):
+            raise OSError("no se pudo convertir el SID a texto")
+        try:
+            return str(texto.value)
+        finally:
+            kernel32.LocalFree(texto)
+    finally:
+        kernel32.CloseHandle(token)
+
+
+def _nombre_de_usuario():
+    """Nombre de carpeta para este usuario: legible y sin sorpresas.
+
+    Va el nombre y no el SID porque el punto de todo esto es que un técnico entre
+    a la carpeta y entienda qué está mirando. Si dos usuarios distintos cayeran
+    en el mismo nombre, la verificación de permisos lo agarra: la carpeta del
+    otro no va a estar abierta para este, y se cae al respaldo.
+    """
+    crudo = (os.environ.get("USERNAME") or os.environ.get("USER")
+             or Path.home().name or "usuario")
+    limpio = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", crudo).strip(" .")
+    return limpio or "usuario"
+
+
+def _resolver_carpeta_datos():
+    """Elige la carpeta de datos y la deja lista. Ver `carpeta_datos()`."""
+    forzada = (os.environ.get(VAR_DATOS) or "").strip()
+    if forzada:
+        carpeta = Path(forzada).expanduser()
+        carpeta.mkdir(parents=True, exist_ok=True)
+        return carpeta
+
+    legado = carpeta_datos_legado()
+    if os.name != "nt":
+        return legado
+
+    deseada = (raiz_instalaciones() / CARPETA_HUB / CARPETA_USUARIOS
+               / _nombre_de_usuario())
+    try:
+        nueva = not deseada.is_dir()
+        deseada.mkdir(parents=True, exist_ok=True)
+        # Recién creada por nosotros: somos el dueño y podemos cerrarla. Si ya
+        # estaba, se comprueba igual —puede venir de un arranque anterior— pero
+        # no se le tocan los permisos: si la hizo otro, no es nuestra.
+        if nueva:
+            _cerrar_carpeta(deseada)
+        if not carpeta_privada(deseada):
+            return legado
+        if not escribible(deseada):
+            return legado
+    except OSError:
+        return legado
+
+    _migrar_datos(legado, deseada)
+    _dejar_leeme(deseada.parent.parent)
+    return deseada
+
+
+# Los archivos que se mudan. `instalado.json` no está: ese vive dentro de la
+# carpeta de cada app, no acá.
+ARCHIVOS_DE_DATOS = ("instalaciones.json", "novedades.json", "minihub_ui.json")
+
+
+def _migrar_datos(desde, hasta):
+    """Trae lo que ya había en `%LOCALAPPDATA%`, una sola vez.
+
+    Se copia y no se mueve: si esta versión se revierte, la copia vieja sigue
+    donde estaba y no se pierde nada. Y solo se copia lo que **falta** en el
+    destino, así una migración a medias no pisa lo nuevo en el próximo arranque.
+    """
+    if not Path(desde).is_dir():
+        return
+    for nombre in ARCHIVOS_DE_DATOS:
+        origen, destino = Path(desde) / nombre, Path(hasta) / nombre
+        if not origen.is_file() or destino.exists():
+            continue
+        try:
+            shutil.copy2(origen, destino)
+        except OSError:
+            pass
+
+
+def _dejar_leeme(carpeta):
+    """Un archivo que explique qué es esto, para el que abra la carpeta."""
+    ruta = Path(carpeta) / "LEEME.txt"
+    if ruta.exists():
+        return
+    try:
+        ruta.write_text(
+            "MINIhub — datos de esta PC\r\n"
+            "==========================\r\n\r\n"
+            "En 'usuarios' hay una carpeta por cada usuario de Windows que haya\r\n"
+            "abierto alguna de estas aplicaciones. Adentro de cada una:\r\n\r\n"
+            "  instalaciones.json  donde tiene instalada cada app ese usuario\r\n"
+            "  novedades.json      que altas, bajas y actualizaciones vio\r\n"
+            "  minihub_ui.json     que dejo plegado en la ventana\r\n\r\n"
+            "Cada carpeta esta cerrada a su usuario y a los administradores, a\r\n"
+            "proposito: de instalaciones.json sale la ruta donde MINIhub despues\r\n"
+            "escribe y a la que apunta el acceso directo que crea. Si cualquiera\r\n"
+            "pudiera editarla, podria hacerle ejecutar a otro un programa suyo.\r\n\r\n"
+            "Se puede borrar todo sin miedo: no hay nada aca que no se pueda\r\n"
+            "reconstruir. Las apps se vuelven a anotar solas al abrirse.\r\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
 
 
 def carpeta_de(app):
     """Dónde MINIhub instalaría esta app si no supiera nada más."""
     return raiz_instalaciones() / app
+
+
+def escribible(carpeta):
+    """True si podemos escribir ahí (la crea si no está).
+
+    Se prueba escribiendo de verdad y no mirando permisos: los permisos de
+    Windows son herencia, ACL y elevación a la vez, y lo único que importa es si
+    el archivo entra.
+    """
+    carpeta = Path(carpeta)
+    try:
+        carpeta.mkdir(parents=True, exist_ok=True)
+        prueba = carpeta / f".permiso-{os.getpid()}.tmp"
+        prueba.write_bytes(b"")
+        prueba.unlink()
+        return True
+    except OSError:
+        return False
+
+
+# --- Dejar la raíz usable ---
+# SID del grupo local Usuarios, no su nombre: en un Windows en español es
+# "Usuarios" y en inglés "Users", e `icacls` no traduce.
+SID_USUARIOS = "*S-1-5-32-545"
+
+
+def raiz_preparada():
+    """True si la raíz de instalaciones existe y se puede escribir en ella."""
+    raiz = raiz_instalaciones()
+    return raiz.is_dir() and escribible(raiz)
+
+
+def preparar_raiz(reparar=True):
+    """Deja `C:\\MainSolution` lista para instalar. Devuelve un código:
+
+    - `"lista"`     ya estaba y se puede escribir
+    - `"creada"`    no estaba y se creó, sin pedir permisos
+    - `"reparada"`  no se podía escribir y hubo que abrirle el permiso (un UAC)
+
+    Levanta `OSError` (o `ElevacionCancelada`) si al final no hay dónde instalar.
+
+    **En una PC normal esto no toca permisos y no muestra ningún cartel**, y vale
+    la pena decir por qué, porque lo intuitivo es lo contrario: la ACL por defecto
+    de la raíz de `C:` ya trae `Usuarios autentificados: Modify` heredable, así que
+    una carpeta creada ahí nace escribible **para todos los usuarios de la PC**, no
+    solo para el que la creó. Distinto de `Program Files`, que es de donde viene
+    esa intuición.
+
+    Por eso el `icacls` es el plan B y no el plan A: se toca la ACL solo si la
+    carpeta de verdad no se puede escribir (una PC con la raíz endurecida por
+    directiva, o una carpeta que dejó otro con permisos propios). Abrirle permisos
+    de arranque a una carpeta que puede ser de otro —`C:\\MainSolution` existe en
+    muchas PC porque la crean los sistemas de gestión— sería cambiarle la
+    seguridad a algo ajeno sin necesidad.
+    """
+    raiz = raiz_instalaciones()
+    existia = raiz.is_dir()
+    try:
+        raiz.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass                       # sin permiso para crearla: lo intenta el plan B
+
+    if escribible(raiz):
+        return "lista" if existia else "creada"
+
+    if not reparar or os.name != "nt":
+        raise OSError(f"No se pudo crear ni escribir en {raiz}.")
+
+    _abrir_raiz_a_todos(raiz)      # puede pedir UAC
+    if not escribible(raiz):
+        raise OSError(
+            f"No se pudo escribir en {raiz} ni después de darle permiso al grupo "
+            "Usuarios. Hace falta que un administrador la cree y la abra a mano."
+        )
+    return "reparada"
+
+
+def _abrir_raiz_a_todos(raiz):
+    """Crea la carpeta y le da modificación al grupo Usuarios.
+
+    Es el plan B de `preparar_raiz()`: solo corre cuando la carpeta no se puede
+    escribir. **Se intenta primero sin elevar**, porque el dueño de una carpeta
+    puede cambiarle los permisos sin ser administrador; el UAC queda para cuando
+    la hizo otro. Probar y ver es más honesto que adivinar mirando
+    `es_administrador()`.
+
+    Va por PowerShell y no por `cmd /c` porque el permiso se escribe
+    `*S-1-5-32-545:(OI)(CI)M` y los paréntesis son sintaxis de `cmd`: quoteado
+    para uno queda mal para el otro. `(OI)(CI)` es la herencia —lo que se cree
+    adentro nace con el mismo permiso—, que es justamente el punto: las carpetas
+    de cada app las va a crear el que instale primero.
+    """
+    ruta = str(raiz).replace("'", "''")
+    comando = (
+        f"New-Item -ItemType Directory -Force -Path '{ruta}' | Out-Null; "
+        f"icacls '{ruta}' /grant '{SID_USUARIOS}:(OI)(CI)M' | Out-Null; "
+        "exit $LASTEXITCODE"
+    )
+    args = ["-NoProfile", "-NonInteractive", "-Command", comando]
+
+    try:
+        salida = subprocess.run(
+            ["powershell", *args], capture_output=True, text=True, timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        ).returncode
+    except (OSError, subprocess.SubprocessError):
+        salida = 1
+    if salida == 0:
+        return True
+
+    salida = correr_elevado("powershell", args)
+    if salida != 0:
+        raise OSError(f"icacls falló con código {salida} sobre {raiz}")
+    return True
 
 
 # ==========================================
@@ -865,7 +1465,10 @@ NOMBRE_REGISTRO = "instalaciones.json"
 
 
 def ruta_registro():
-    return raiz_instalaciones() / NOMBRE_REGISTRO
+    # En `carpeta_datos()`, que es la carpeta cerrada a este usuario, y no suelto
+    # en la raíz de instalaciones: de acá sale la ruta donde MINIhub después
+    # escribe (ver el comentario de ENTORNO).
+    return carpeta_datos() / NOMBRE_REGISTRO
 
 
 def _leer_registro():
@@ -949,7 +1552,7 @@ def ubicacion_registrada(app, exe=None):
 
     if not carpeta.is_dir() or carpeta.parent == carpeta:
         return None            # no existe, o es la raíz de un disco
-    if _es_carpeta_del_sistema(carpeta):
+    if es_carpeta_del_sistema(carpeta):
         return None
     if exe and not (carpeta / exe).is_file():
         return None            # se movió o se borró: el registro quedó viejo
@@ -961,8 +1564,13 @@ def ubicacion_registrada(app, exe=None):
     }
 
 
-def _es_carpeta_del_sistema(carpeta):
-    """Lugares donde no se instala una app, pase lo que pase."""
+def es_carpeta_del_sistema(carpeta):
+    """Lugares donde no se instala una app, pase lo que pase.
+
+    Lo usa `ubicacion_registrada()` y también MINIhub cuando el usuario elige a
+    mano dónde instalar: la misma regla en los dos caminos, para que elegir la
+    carpeta no sea una forma de saltear la validación.
+    """
     texto = str(carpeta).lower().replace("/", "\\").rstrip("\\")
     for raiz in (os.environ.get("SystemRoot"), os.environ.get("ProgramFiles"),
                  os.environ.get("ProgramFiles(x86)"), os.environ.get("ProgramData")):
@@ -995,12 +1603,163 @@ def proceso_vivo(nombre_exe):
     return nombre_exe.lower() in salida.lower()
 
 
-def lanzar(exe, cwd=None):
-    """Ejecuta un .exe desregistrado de este proceso."""
+class ElevacionCancelada(Exception):
+    """El usuario dijo que no en el cartel de UAC."""
+
+
+def lanzar(exe, cwd=None, admin=False):
+    """Ejecuta un .exe desregistrado de este proceso.
+
+    Algunas apps se compilan con `uac_admin=True` (hoy `MiniGreitor` y
+    `ModuloEslaboonComit`): su manifiesto pide `requireAdministrator`, y a un
+    ejecutable así **`CreateProcess` lo rechaza de plano** con
+    `[WinError 740] La operación solicitada requiere elevación`. `subprocess`
+    usa `CreateProcess`, así que no hay forma de lanzarlas desde acá sin pasar
+    por el shell: el que sabe disparar el UAC es `ShellExecuteW` con el verbo
+    `runas`.
+
+    Se intenta primero sin elevar y se cae a `runas` con el 740, en vez de
+    confiar solo en el flag: el flag es una declaración del catálogo y puede
+    quedar vieja (una app que hoy no pide admin y mañana sí, o al revés), y el
+    740 es el sistema diciendo la verdad en el momento.
+    """
     exe = Path(exe)
     if not exe.is_file():
         raise FileNotFoundError(f"no existe {exe}")
-    subprocess.Popen([str(exe)], cwd=str(cwd or exe.parent), close_fds=True)
+    cwd = str(cwd or exe.parent)
+
+    if not admin:
+        try:
+            subprocess.Popen([str(exe)], cwd=cwd, close_fds=True)
+            return False
+        except OSError as e:
+            if getattr(e, "winerror", None) != 740:
+                raise
+    _lanzar_elevado(exe, cwd)
+    return True
+
+
+# Códigos de ShellExecuteW. Devuelve un HINSTANCE falso: **mayor que 32 es éxito**
+# y cualquier otra cosa es el código de error.
+SE_ERR_ACCESSDENIED = 5
+ERROR_CANCELLED = 1223
+SW_SHOWNORMAL = 1
+
+
+def _lanzar_elevado(exe, cwd):
+    """Abre el .exe pidiendo elevación (el cartel de UAC lo muestra Windows)."""
+    if os.name != "nt":
+        raise OSError("solo se puede elevar en Windows")
+    import ctypes
+
+    # `use_last_error` porque el motivo real no viene en el valor de retorno: si
+    # el usuario dice que no en el UAC, `ShellExecuteW` devuelve
+    # SE_ERR_ACCESSDENIED y el ERROR_CANCELLED queda en `GetLastError`.
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    shell32.ShellExecuteW.restype = ctypes.c_void_p
+    shell32.ShellExecuteW.argtypes = [
+        ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_wchar_p,
+        ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_int,
+    ]
+    ctypes.set_last_error(0)
+    r = int(shell32.ShellExecuteW(
+        None, "runas", str(exe), None, str(cwd), SW_SHOWNORMAL) or 0)
+    if r > 32:
+        return
+
+    ultimo = ctypes.get_last_error()
+    if r == SE_ERR_ACCESSDENIED or ultimo == ERROR_CANCELLED:
+        raise ElevacionCancelada(
+            "Hace falta permiso de administrador y Windows no lo concedió."
+        )
+    raise OSError(
+        f"ShellExecute devolvió {r} (error {ultimo}) al intentar elevar {exe.name}"
+    )
+
+
+def es_administrador():
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def correr_elevado(exe, args=(), timeout=None):
+    """Corre algo con el verbo `runas` (UAC) y **espera** a que termine.
+    Devuelve su código de salida.
+
+    Es `ShellExecuteExW` y no `ShellExecuteW` —el que usa `lanzar()`— porque el
+    segundo no devuelve un handle del proceso: no habría forma de esperarlo ni de
+    leer su código de salida, y sin eso no se sabe si lo que se pidió quedó hecho.
+
+    `SEE_MASK_NOASYNC` es obligatorio: sin él la llamada puede volver antes de que
+    el shell haya terminado de arrancar el proceso, y un hilo que no bombea
+    mensajes (un `QThread`) se queda con un handle inválido.
+
+    Las estructuras se definen adentro porque `ctypes.wintypes` no existe fuera de
+    Windows y este archivo tiene que poder importarse igual.
+    """
+    if os.name != "nt":
+        raise OSError("solo se puede elevar en Windows")
+    import ctypes
+    from ctypes import wintypes
+
+    class SHELLEXECUTEINFOW(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("fMask", ctypes.c_ulong),
+            ("hwnd", wintypes.HWND),
+            ("lpVerb", wintypes.LPCWSTR),
+            ("lpFile", wintypes.LPCWSTR),
+            ("lpParameters", wintypes.LPCWSTR),
+            ("lpDirectory", wintypes.LPCWSTR),
+            ("nShow", ctypes.c_int),
+            ("hInstApp", wintypes.HINSTANCE),
+            ("lpIDList", ctypes.c_void_p),
+            ("lpClass", wintypes.LPCWSTR),
+            ("hkeyClass", wintypes.HKEY),
+            ("dwHotKey", wintypes.DWORD),
+            ("hIcon", wintypes.HANDLE),
+            ("hProcess", wintypes.HANDLE),
+        ]
+
+    SEE_MASK_NOCLOSEPROCESS = 0x00000040
+    SEE_MASK_NOASYNC = 0x00000100
+    SW_HIDE = 0
+
+    info = SHELLEXECUTEINFOW()
+    info.cbSize = ctypes.sizeof(info)
+    info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC
+    info.lpVerb = "runas"
+    info.lpFile = str(exe)
+    info.lpParameters = subprocess.list2cmdline([str(a) for a in args])
+    info.nShow = SW_HIDE
+
+    # `use_last_error=True` no es un detalle: sin eso `ctypes.get_last_error()`
+    # devuelve siempre 0 y no se podría distinguir "el usuario dijo que no al UAC"
+    # (1223, que es normal) de un error de verdad.
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    ctypes.set_last_error(0)
+    if not shell32.ShellExecuteExW(ctypes.byref(info)):
+        error = ctypes.get_last_error()
+        if error == ERROR_CANCELLED:
+            raise ElevacionCancelada("el usuario rechazó el UAC")
+        raise OSError(f"no se pudo elevar {exe} (error {error})")
+    if not info.hProcess:
+        raise OSError(f"{exe} se lanzó pero no devolvió un proceso")
+
+    espera = 0xFFFFFFFF if timeout is None else int(timeout * 1000)
+    try:
+        ctypes.windll.kernel32.WaitForSingleObject(info.hProcess, espera)
+        salida = wintypes.DWORD()
+        ctypes.windll.kernel32.GetExitCodeProcess(info.hProcess,
+                                                  ctypes.byref(salida))
+        return int(salida.value)
+    finally:
+        ctypes.windll.kernel32.CloseHandle(info.hProcess)
 
 
 # Variables que fuerzan la autoactualización corriendo desde el .py.

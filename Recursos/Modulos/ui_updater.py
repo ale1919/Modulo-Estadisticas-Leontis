@@ -34,6 +34,15 @@ from . import nucleo
 from .version import APP_NAME, APP_VERSION
 
 
+# Cuánto se espera antes de mostrar el diálogo si el chequeo todavía no terminó.
+# Medido contra el FTP real, leer un manifiesto tarda ~700 ms: con el umbral en
+# 800 ms el diálogo alcanzaba a aparecer y desaparecer en un arranque normal, que
+# es justo lo que arranca oculto para evitar. Con 2,5 s no se ve nunca cuando no
+# hay nada que hacer, y sigue dando señal de vida si el FTP está colgado (su
+# timeout es de 12 s).
+MS_ANTES_DE_MOSTRAR = 2500
+
+
 def fmt_bytes(n):
     if n <= 0:
         return "0 MB"
@@ -81,6 +90,7 @@ class HiloAutoActualizacion(QThread):
 
             self.estado.emit("Comparando archivos…")
             plan = self.instalacion.armar_plan(manifiesto)
+            self.instalacion.podar_staging(plan)
             if not plan.hay_algo_que_hacer:
                 # Mismo contenido con otro número de versión.
                 self.resultado.emit("al-dia", remota)
@@ -121,6 +131,11 @@ class DialogoAutoActualizacion(QDialog):
         super().__init__(parent)
         self.setWindowTitle(f"Actualización de {APP_NAME}")
         self.setMinimumWidth(480)
+        # Con ventana detrás (MINIhub, que se autoactualiza con su ventana ya
+        # abierta) el diálogo es modal: mientras se reemplaza el build no se
+        # puede seguir usando la app que se está reemplazando.
+        if parent is not None:
+            self.setModal(True)
 
         self.continuar_app = True
         self.reiniciar_app = False
@@ -161,7 +176,14 @@ class DialogoAutoActualizacion(QDialog):
 
     def iniciar(self):
         self.hilo.start()
-        QTimer.singleShot(800, self._mostrar_si_sigue)
+        # Si hay una ventana detrás, el chequeo no se anuncia: la app ya está en
+        # pantalla y un cartel que aparece y se va solo es peor que nada. El
+        # diálogo sale igual apenas se sepa que hay versión nueva
+        # (`_on_disponible`) o que algo falló. Sin ventana detrás —el resto de
+        # las apps, que chequean antes de abrir la suya— la pantalla estaría
+        # vacía, y ahí sí conviene mostrar que se está haciendo algo.
+        if self.parent() is None:
+            QTimer.singleShot(MS_ANTES_DE_MOSTRAR, self._mostrar_si_sigue)
 
     def _mostrar_si_sigue(self):
         if not self.terminado and not self.isVisible():
@@ -268,13 +290,18 @@ class DialogoAutoActualizacion(QDialog):
         event.accept()
 
 
-def chequear_al_inicio(carpeta):
+def chequear_al_inicio(carpeta, parent=None):
     """Punto de entrada. Devuelve True si la app tiene que seguir arrancando y
     False si tiene que cerrarse (porque se actualizó y se relanzó, o porque el
     usuario canceló).
 
     Se llama desde `main.py` después de crear el QApplication y antes de construir
     la ventana principal.
+
+    `parent` es para el caso de MINIhub, que lo llama **con su ventana ya
+    abierta**: ahí el chequeo no tiene por qué mostrar nada (la app ya está en
+    pantalla) y el diálogo, cuando haga falta, sale modal encima de ella. El
+    resto de las apps lo llaman sin padre y nada cambia para ellas.
     """
     # Anotarse en el registro local de instalaciones, para que MINIhub sepa dónde
     # está esta app aunque no la haya instalado él. Es el caso de todas las copias
@@ -299,10 +326,12 @@ def chequear_al_inicio(carpeta):
 
     instalacion = nucleo.Instalacion(APP_NAME, carpeta)
     # Restos de la actualización anterior: ahora sí se pueden borrar, el proceso
-    # que los tenía abiertos ya murió.
-    instalacion.limpiar_rastros()
+    # que los tenía abiertos ya murió. El staging no, que son los objetos ya
+    # bajados de una descarga que se cortó; los que ya no sirvan los saca
+    # `podar_staging()` cuando el plan diga qué hace falta.
+    instalacion.limpiar_rastros(incluir_staging=False)
 
-    dlg = DialogoAutoActualizacion(instalacion)
+    dlg = DialogoAutoActualizacion(instalacion, parent)
     espera = QEventLoop()
     dlg.finished.connect(espera.quit)
     dlg.iniciar()

@@ -21,6 +21,10 @@ Puntos que importan aunque vengas a hacer otra cosa:
   **onedir**, nunca onefile.
 - `Recursos/Config` es la carpeta que el updater no toca nunca. Todo lo que sea de cada
   instalación va ahí; nada que tenga que actualizarse puede estar ahí.
+- El `CHANGELOG.md` de esta carpeta es lo que MINIhub muestra en el botón
+  **Changelog** de la tarjeta. **Al publicar una versión nueva hay que agregarle
+  su sección**, arriba de todo: el publicador se lo lleva entero dentro del
+  manifiesto firmado.
 - Publicar se hace desde MINIhub (`python publicar_app.py --app ModuloEstadisticasLeontis`), no desde
   este repo.
 
