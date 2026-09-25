@@ -10,31 +10,90 @@ recibo de cobranza se contaba como una venta nueva.
 Todo lo que mida ventas tiene que usar `FILTRO_VENTA` y `SIGNO_VENTA`. No los
 repitas a mano: si mañana aparece otro tipo de comprobante, se corrige acá y vale
 para toda la app.
+
+La primera versión de esta tabla se dedujo mirando esta misma app y estaba mal
+(AUDITORIA.md §7.1): tomaba el -83 por un recibo cuando es una nota de crédito X,
+dejaba afuera toda la venta en X (-81) y contaba los presupuestos (-84) como
+venta. En la copia de producción, la venta en X es más de la mitad de la
+facturación y los presupuestos eran casi una tercera parte de lo que la app
+mostraba.
 """
 
 import pandas as pd
 from sqlalchemy import bindparam, text
 
-# Tipos de comprobante, según los usa el propio sistema Leontis.
-#   1 = FC A    6 = FC B    11 = FC M     (facturas: suman)
-#   3 = NC A    8 = NC B    13 = NC M     (notas de crédito: restan)
-# -81 = CO X  -83 = RC X                  (interno y recibo: no son venta)
-TIPOS_NOTA_CREDITO = (3, 8, 13)
-TIPOS_NO_VENTA = (-81, -83)
+# Tipos de comprobante, copiados de Leontis:
+# `BizSuite.Logic/Entidades/NoPersistidas/TiposDeComprobante.json`.
+# id -> (nombre corto, es nota de crédito)
+TIPOS_COMPROBANTE = {
+    1: ("FC A", False), 2: ("ND A", False), 3: ("NC A", True),
+    6: ("FC B", False), 7: ("ND B", False), 8: ("NC B", True),
+    11: ("FC C", False), 12: ("ND C", False), 13: ("NC C", True),
+    15: ("RC C", False), 51: ("FC M", False),
+    -81: ("CO X", False), -83: ("NC X", True),
+    -84: ("PRES", False), -88: ("RE X", False),
+}
+TIPOS_NOTA_CREDITO = tuple(t for t, (_, credito) in TIPOS_COMPROBANTE.items() if credito)
+# El presupuesto se guarda en `comprobanteemitido` pero no es una venta: el ERP
+# no le descuenta stock y su propia Caja Diaria lo excluye. El remito X sí se
+# cuenta, igual que en la Caja Diaria del ERP: mueve stock y se cobra.
+TIPO_PRESUPUESTO = -84
+TIPOS_NO_VENTA = (TIPO_PRESUPUESTO,)
+
+
+def _lista_sql(valores):
+    """`(1, 2)` para un IN. El repr de una tupla de un elemento es `(-84,)`,
+    que es SQL inválido."""
+    return "(" + ", ".join(str(int(v)) for v in valores) + ")"
 
 
 def SIGNO_VENTA(alias="ce"):
-    """Expresión SQL que vale -1 para notas de crédito y 1 para facturas."""
+    """Expresión SQL que vale -1 para notas de crédito y 1 para el resto."""
     prefijo = f"{alias}." if alias else ""
     return (f"CASE WHEN {prefijo}idTipoComprobante IN "
-            f"{TIPOS_NOTA_CREDITO} THEN -1 ELSE 1 END")
+            f"{_lista_sql(TIPOS_NOTA_CREDITO)} THEN -1 ELSE 1 END")
 
 
 def FILTRO_VENTA(alias="ce"):
     """Condiciones que dejan solo los comprobantes que son una venta real."""
     prefijo = f"{alias}." if alias else ""
     return (f" AND {prefijo}Anulado = 0"
-            f" AND {prefijo}idTipoComprobante NOT IN {TIPOS_NO_VENTA}")
+            f" AND {prefijo}idTipoComprobante NOT IN {_lista_sql(TIPOS_NO_VENTA)}")
+
+
+def NOMBRE_TIPO_SQL(columna):
+    """CASE que traduce el id de tipo al nombre corto que usa Leontis."""
+    ramas = " ".join(f"WHEN {t} THEN '{nombre}'"
+                     for t, (nombre, _) in TIPOS_COMPROBANTE.items())
+    return f"CASE {columna} {ramas} ELSE CAST({columna} AS CHAR) END"
+
+
+# Medios de pago, con el enum de Leontis (`ComprobanteEmitido.cs`, MedioDePago).
+#
+# Al contado el ERP guarda `PagoEfectivo = Total` sea cual sea el medio: el medio
+# real está en `IdMedioDePago`. En cuenta corriente deja `IdMedioDePago` en NULL.
+# Las empresas que no piden el medio al facturar también lo dejan en NULL, pero
+# el comprobante nace cobrado: `Pagado = 1` con `FechaPago` igual a la fecha del
+# comprobante. Eso es lo que separa "contado sin medio" de "cuenta corriente".
+#
+# Es un CASE con ramas ordenadas y un ELSE, así que cada comprobante cae en un
+# solo medio y la suma de los medios es siempre el total. Antes Efectivo sumaba
+# `PagoEfectivo` —todo lo cobrado al contado, con tarjeta y Mercado Pago
+# incluidos—, Tarjeta daba casi cero y "Otros" era en realidad la cuenta
+# corriente (AUDITORIA.md §7.2).
+MEDIOS_DE_PAGO = ("Efectivo", "Tarjeta", "Cheque", "Mercado Pago", "Otros",
+                  "Cuenta Corriente")
+
+
+def MEDIO_DE_PAGO_SQL(alias=""):
+    p = f"{alias}." if alias else ""
+    return (f"CASE WHEN {p}IdMedioDePago = 1 THEN 'Efectivo'"
+            f" WHEN {p}IdMedioDePago = 2 THEN 'Tarjeta'"
+            f" WHEN {p}IdMedioDePago = 3 THEN 'Cheque'"
+            f" WHEN {p}IdMedioDePago = 4 THEN 'Mercado Pago'"
+            f" WHEN {p}IdMedioDePago IS NOT NULL THEN 'Otros'"
+            f" WHEN {p}Pagado = 1 AND {p}FechaPago = {p}FechaComprobante THEN 'Efectivo'"
+            f" ELSE 'Cuenta Corriente' END")
 
 
 class StatisticsGenerator:
@@ -240,24 +299,15 @@ class StatisticsGenerator:
             query, {"company_id": company_id, "days": days})
 
     def _sql_medios_de_pago(self):
-        """Las cuatro categorías de cobro, como partición exclusiva del total.
-
-        Antes 'Efectivo' y 'Cheque' sumaban campos de pago parcial mientras que
-        'Tarjeta' y 'Otros' sumaban el total del comprobante, así que una factura
-        pagada mitad y mitad se contaba dos veces y las columnas no sumaban el
-        total. Ahora el resto no cubierto por efectivo ni cheque se imputa a
-        tarjeta o a cuenta corriente según el medio declarado, y se cumple
-        Efectivo + Cheque + Tarjeta + Otros = Total.
-        """
+        """Una columna por medio de pago, como partición exclusiva del total:
+        la suma de las columnas es siempre `SUM(TotalOperacion * signo)`.
+        La definición de cada medio está en `MEDIO_DE_PAGO_SQL`."""
         signo = SIGNO_VENTA('')
-        resto = "(TotalOperacion - PagoEfectivo - PagoCheques)"
+        medio = MEDIO_DE_PAGO_SQL('')
         return {
-            'Efectivo': f"SUM(PagoEfectivo * {signo})",
-            'Cheque': f"SUM(PagoCheques * {signo})",
-            'Tarjeta': (f"SUM(CASE WHEN IdMedioDePago = 2 "
-                        f"THEN {resto} * {signo} ELSE 0 END)"),
-            'Otros': (f"SUM(CASE WHEN IdMedioDePago <> 2 OR IdMedioDePago IS NULL "
-                      f"THEN {resto} * {signo} ELSE 0 END)"),
+            nombre: (f"SUM(CASE WHEN {medio} = '{nombre}' "
+                     f"THEN TotalOperacion * {signo} ELSE 0 END)")
+            for nombre in MEDIOS_DE_PAGO
         }
 
     def get_sales_by_day_for_excel(self, company_id, days, payment_methods):
@@ -450,7 +500,7 @@ class StatisticsGenerator:
                 JOIN comprobanteemitidoitems it
                      ON it.idComprobanteEmitido = ce.idComprobanteEmitido
                 WHERE ce.idEmpresa = :company_id
-                  AND ce.idTipoComprobante NOT IN {TIPOS_NOTA_CREDITO + TIPOS_NO_VENTA}
+                  AND ce.idTipoComprobante NOT IN {_lista_sql(TIPOS_NOTA_CREDITO + TIPOS_NO_VENTA)}
                   AND ce.Anulado = 0
                   AND it.idArticulo IS NOT NULL
                 {date_filter_sql}
@@ -598,7 +648,7 @@ class StatisticsGenerator:
             return self.db_manager._execute_query(query_case_1, params)
 
         client_limit_sql = "LIMIT :client_limit" if client_limit != -1 else ""
-        tipos_credito = TIPOS_NOTA_CREDITO + (-83,)
+        tipos_credito = _lista_sql(TIPOS_NOTA_CREDITO)
 
         if voucher_scope == -99:
             voucher_where_filter = ""
@@ -651,17 +701,7 @@ class StatisticsGenerator:
                 ov.FechaComprobante AS 'Fecha',
                 tc.CodigoCliente AS 'Código Cliente',
                 tc.RazonSocial AS 'Cliente',
-                CASE
-                    WHEN ov.idTipoComprobante = 1 THEN 'FC A'
-                    WHEN ov.idTipoComprobante = 6 THEN 'FC B'
-                    WHEN ov.idTipoComprobante = 3 THEN 'NC A'
-                    WHEN ov.idTipoComprobante = 8 THEN 'NC B'
-                    WHEN ov.idTipoComprobante = 11 THEN 'FC M'
-                    WHEN ov.idTipoComprobante = 13 THEN 'NC M'
-                    WHEN ov.idTipoComprobante = -81 THEN 'CO X'
-                    WHEN ov.idTipoComprobante = -83 THEN 'RC X'
-                    ELSE CAST(ov.idTipoComprobante AS CHAR)
-                END AS 'T.C.',
+                {NOMBRE_TIPO_SQL('ov.idTipoComprobante')} AS 'T.C.',
                 LPAD(ov.idPuntoVenta, 4, '0') AS 'Punto Venta',
                 LPAD(ov.NumeroComprobante, 8, '0') AS 'N° Comprobante',
                 ov.TotalOperacion AS 'Total Operación',
@@ -691,7 +731,7 @@ class StatisticsGenerator:
         hace cuánto. En un corralón que le fía a constructoras, esa es la
         diferencia entre "paga a 30 días" y "plata perdida".
         """
-        tipos_credito = TIPOS_NOTA_CREDITO + (-83,)
+        tipos_credito = _lista_sql(TIPOS_NOTA_CREDITO)
         query = f"""
             WITH SaldosAbiertos AS (
                 SELECT

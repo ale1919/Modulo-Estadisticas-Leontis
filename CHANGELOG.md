@@ -10,6 +10,25 @@ error deja de aparecer, qué hay que hacer distinto.
 
 ---
 
+## Sin publicar
+
+**Las ventas ahora cierran con las de Leontis.** Hasta esta versión la app:
+
+- **dejaba afuera toda la venta en comprobante X**, que en muchos comercios es
+  la mayor parte de la facturación;
+- **contaba los presupuestos como si fueran ventas**;
+- no restaba las notas de crédito X.
+
+Ahora facturas, notas de débito y comprobantes X suman; todas las notas de
+crédito restan; presupuestos y anulados no cuentan. Los totales de todos los
+informes van a cambiar, y es lo esperado: los de antes estaban mal.
+
+**Medios de pago como en la Caja Diaria de Leontis.** Se usa el medio que se
+eligió al facturar. Aparecen **Mercado Pago** y **Cuenta Corriente** como
+líneas propias. Antes casi todo figuraba como "Efectivo", "Tarjeta" daba cero y
+lo que decía "Otros" era en realidad la cuenta corriente. Si su Leontis no pide
+el medio de pago al facturar, lo cobrado en el momento figura como Efectivo.
+
 ## 0.1.2 — 2026-08-14
 
 **El aviso de actualización ya no parpadea al abrir.** Al arrancar, la app chequea

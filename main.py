@@ -619,8 +619,9 @@ class InstructionsDialog(QDialog):
         <p>Genera dos gráficos para el PDF: un gráfico de línea con el <b>Total de Ventas</b> por día, y un gráfico multilínea mostrando la venta diaria separada por <b>Medio de Pago</b>.</p>
         <ul>
             <li><strong>Período:</strong> Rango de tiempo para el gráfico.</li>
-            <li><strong>Medios de Pago:</strong> Define qué líneas se incluyen en el gráfico multilínea (afecta también al Excel).</li>
+            <li><strong>Medios de Pago:</strong> Define qué líneas se incluyen en el gráfico multilínea (afecta también al Excel). Se usa el medio que se eligió al facturar en Leontis, igual que en su Caja Diaria. Si su sistema no pide el medio de pago, lo facturado al contado figura como <b>Efectivo</b>, y lo facturado en <b>Cuenta Corriente</b> va aparte.</li>
         </ul>
+        <p><b>Qué cuenta como venta:</b> facturas, notas de débito y comprobantes X suman; las notas de crédito (incluidas las X) restan. Los <b>presupuestos</b> y los comprobantes anulados no se cuentan.</p>
 
         <h2 id="stock">Pestaña: Stock</h2>
         <h3>Análisis de Stock (Tabla)</h3>

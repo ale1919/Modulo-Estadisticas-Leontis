@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
 )
 
 from .rutas import recurso
+from .statistics_generator import MEDIOS_DE_PAGO
 from .ui_styles import (
     BRAND_ACCENT_BUTTON_STYLE, BRAND_HEADER_STYLE, FOOTER_FRAME_STYLE,
     GREEN_BUTTON_STYLE, HEADER_HELP_BUTTON_STYLE, MODERN_COMBOBOX_STYLE,
@@ -300,20 +301,19 @@ class UIFactory:
         payment_layout.setHorizontalSpacing(15)
         payment_layout.setVerticalSpacing(10)
 
+        # Las claves son los nombres de columna que devuelve la consulta
+        # (`statistics_generator.MEDIOS_DE_PAGO`); el texto es lo que se ve.
+        etiquetas_medios = {"Tarjeta": "Tarjeta (Posnet)"}
         self.main_window.payment_method_checkboxes = {
-            "Efectivo": QCheckBox("Efectivo"), "Tarjeta": QCheckBox("Tarjeta"),
-            "Cheque": QCheckBox("Cheque"), "Otros": QCheckBox("Otros")
+            medio: QCheckBox(etiquetas_medios.get(medio, medio))
+            for medio in MEDIOS_DE_PAGO
         }
-        
-        for chk in self.main_window.payment_method_checkboxes.values():
+
+        for posicion, chk in enumerate(self.main_window.payment_method_checkboxes.values()):
             chk.setChecked(True)
             chk.setStyleSheet(modern_checkbox_style)
-
-        payment_layout.addWidget(self.main_window.payment_method_checkboxes["Efectivo"], 0, 0)
-        payment_layout.addWidget(self.main_window.payment_method_checkboxes["Tarjeta"], 0, 1)
-        payment_layout.addWidget(self.main_window.payment_method_checkboxes["Cheque"], 1, 0)
-        payment_layout.addWidget(self.main_window.payment_method_checkboxes["Otros"], 1, 1)
-        payment_layout.setColumnStretch(2, 1) 
+            payment_layout.addWidget(chk, posicion // 2, posicion % 2)
+        payment_layout.setColumnStretch(2, 1)
 
         card4_widgets = [
             QLabel("Período:"),

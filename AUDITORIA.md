@@ -16,6 +16,8 @@ Repo: https://github.com/ale1919/Modulo-Estadisticas-Leontis
 3. [Estadísticas nuevas propuestas](#3-estadísticas-nuevas-propuestas)
 4. [Índices SQL recomendados](#4-índices-sql-recomendados)
 5. [Plan de trabajo sugerido](#5-plan-de-trabajo-sugerido)
+6. [Bitácora](#6-bitácora)
+7. [Segunda auditoría (2026-09-25): contrastada contra el código de Leontis](#7-segunda-auditoría-2026-09-25)
 
 ---
 
@@ -1337,3 +1339,166 @@ API, lo que hacen las otras es evidencia sobre lo que el servidor soporta.
 # Lo que había que correr antes de tocar el esquema:
 python -c "import requests; print(requests.post('https://sistema.leontis.com.ar:65081/login', json={}, timeout=10).status_code)"
 ```
+
+---
+
+# 7. Segunda auditoría (2026-09-25)
+
+Alcance: versión 0.1.2, contrastada esta vez **contra el código de Leontis**
+(clon local de solo lectura en `LEONTIS/LEONTIS ERP`), no solo contra el
+esquema. La primera auditoría dedujo el significado de los tipos de comprobante
+y de los campos de pago mirando esta misma app; leyendo el ERP que los escribe,
+varias de esas deducciones resultan equivocadas.
+
+**Estado:** §7.1 y §7.2 aplicadas el 2026-09-25 (con `-81` como venta, confirmado
+por el usuario, y `-88` también, igual que la Caja Diaria del ERP). El resto,
+pendiente.
+
+## 7.1 🔴 Los tipos de comprobante están mal mapeados
+
+Fuente de verdad: `BizSuite.Logic/Entidades/NoPersistidas/TiposDeComprobante.json`.
+
+| id | Leontis dice | La app asume | Efecto hoy |
+|---|---|---|---|
+| 11 / 13 | **FC C / NC C** | "FC M / NC M" | Solo etiqueta mal en el Excel de cta. cte. |
+| 2 / 7 / 12 | ND A / B / C | — | Suman: correcto |
+| 15 | RC C (recibo C, en libro IVA) | — | Suma como venta. **A confirmar** si el cliente lo usa como factura o como recibo |
+| 51 | FC M | — | Suma: correcto, pero sin etiqueta en el Excel |
+| -81 | **CO X: venta sin factura** | "comprobante interno, no es venta" | **Toda la venta en X queda fuera de todos los informes** |
+| -83 | **NC X: nota de crédito X** (`EsCredito`) | "recibo de cobranza" | Se excluye; debería restar |
+| -84 | **PRESUPUESTO** | — | **Se cuenta como venta** en todos los informes |
+| -88 | REMITO X | — | Se cuenta como venta. **A confirmar** si después se factura (doble conteo) |
+
+El ERP confirma el tratamiento del presupuesto: no mueve stock
+(`lgComprobantes.cs:61`) y su propia Caja Diaria lo excluye (`lgVentas.cs:85`).
+
+**Corrección propuesta:** derivar signo y filtro del JSON de Leontis (copiado a
+`Recursos/Datos`) en vez de listas a mano: `EsCredito` → −1, `-84` fuera,
+y un check *"Incluir comprobantes X"* (default: sí) para el que quiera ver solo
+lo fiscal. Antes de publicar, en una base real:
+
+```sql
+SELECT idTipoComprobante, COUNT(*), SUM(TotalOperacion)
+FROM comprobanteemitido WHERE Anulado = 0 GROUP BY 1;
+```
+
+El aging y el detalle de cta. cte. también toman presupuestos como deuda
+abierta, y el ERP los suma al `SaldoActual` del cliente (`lgComprobantes.cs:90`):
+puede ser que el saldo mismo esté inflado. Eso es de Leontis, no de acá, pero
+conviene saberlo antes de leer el informe.
+
+## 7.2 🔴 El desglose por medio de pago mide otra cosa
+
+En Leontis, al emitir al **contado** `PagoEfectivo = TotalComprobante` sea cual
+sea el medio (`frmEmitirComprobantes.cs:486` y `:535`); el medio real va en
+`IdMedioDePago` (1 Efectivo, 2 Posnet, 3 Cheques, **4 Mercado Pago**, 255 Otros —
+enum en `ComprobanteEmitido.cs:11`). En **cuenta corriente**
+`PagoEfectivo = seña` e `IdMedioDePago = NULL`.
+
+Con eso, la partición de §1.2 queda así:
+
+- **"Efectivo"** = todo lo cobrado al contado (efectivo + posnet + Mercado Pago…).
+- **"Tarjeta"** ≈ 0 siempre (el resto de una venta contado es cero).
+- **"Otros"** = en realidad es **cuenta corriente**.
+- **Mercado Pago no aparece** como medio de pago.
+
+Y no coincide con la Caja Diaria del ERP, que suma `TotalOperacion` por
+`IdMedioDePago` (`frmCajaDiaria.cs:55-59`): el dueño compara las dos pantallas y
+ve números distintos. **Corrección:** la misma definición que el ERP, con cinco
+medios + "Cuenta Corriente", aplicada también al KPI de 7 días.
+
+## 7.3 🟠 Bugs nuevos
+
+| # | Dónde | Qué pasa |
+|---|---|---|
+| 7.3.1 | `statistics_generator._get_date_filter` | `>= CURDATE() - N DAY AND <= CURDATE()` son **N+1 días**. "Últimas 24 horas" trae ayer y hoy; "30 días" son 31. La venta diaria del sugerido de compra sale inflada (N+1)/N (+14% con 7 días). |
+| 7.3.2 | `_quintil` | `rank(method='first')` desempata **por orden de fila**: dos clientes con 1 compra cada uno pueden quedar con F=1 y F=3. Donde la mayoría compró una vez, el RFM es casi aleatorio. |
+| 7.3.3 | `get_rfm_analysis_data` | Los segmentos se superponen (Nuevos ⊂ Potenciales, Prometedores ⊂ Leales, Necesitan Atención ∩ Leales) y hay huecos (R=3, F=1 no cae en ninguno). El gráfico suma más clientes de los que hay. Hace falta una sola columna `Segmento` con reglas excluyentes. |
+| 7.3.4 | `dashboard_manager.check_and_fetch_external_data` | QSettings en el registro devuelve los `float` como `str` (verificado: `'1234.5' str`). El `isinstance(..., (int, float))` falla siempre: **el caché de 24 h nunca se usa** y cada arranque pega a las 4 APIs. |
+| 7.3.5 | `main.export_to_pdf` / `export_to_excel` | "Margen Bruto" con *Todos (sin gráfico)* **igual intenta graficar**: el filtro es `"top" in report_name`. Con miles de artículos, `fig_height = n*0.5+2` pide una figura de miles de pulgadas. |
+| 7.3.6 | Excel de cta. cte. | Formato por **letra** con las columnas corridas: en el detalle `K` es **DNI** (sale con `$`) y el saldo total del cliente (`M`) queda sin formato; en "Solo totales" se formatea `E` (Teléfono) y no `F` (Saldo). |
+| 7.3.7 | Excel del RFM | `F` (Frecuencia) sale como moneda y `G` (Monetario) no. El formato condicional busca `"Si"`/`"No"` pero las columnas son booleanas: nunca pinta. Se exporta `idCliente` crudo. |
+| 7.3.8 | Excel del sugerido de compra | `J:K` como moneda: `K` es la fecha de última compra, e `I` (costo unitario) queda sin formato. |
+| 7.3.9 | `get_customer_debt_for_excel` | "Top N comprobantes adeudados" ordena por `TotalOperacion - TotalPagos` sin signo: una **nota de crédito** sin aplicar aparece como "el comprobante más adeudado". |
+| 7.3.10 | `generate_statistics` | El caché de §2.4 solo cubre el detalle: margen, ABC y RFM se calculan **dos veces** por exportación (gráfico + detalle). |
+| 7.3.11 | `MainWindow` | Título fijo "v4.2"; la versión real es `APP_VERSION = 0.1.2`. |
+| 7.3.12 | Combos de período | No hay 180 ni 365 días: ABC, RFM y sugerido de compra solo eligen entre 90 días o "Todo el historial" (y con inflación el historial completo pesa casi solo lo último). |
+
+## 7.4 🟡 A validar contra una base real
+
+- **Costo:** el ERP arma el precio sobre `PrecioCosto * (1 - DescuentoProveedor/100)`
+  (`DtoListaPrecios.cs:96`), pero su propia `Rentabilidad` usa `PrecioCosto`
+  crudo, igual que esta app. Hay que decidir cuál es el costo "real".
+- **Artículos en dólares** (`idMoneda = 2`): la conversión está comentada en el
+  ERP. Si hay artículos con costo en USD, capital inmovilizado, SLOB y sugerido
+  de compra los suman como si fueran pesos.
+- **Margen:** `comprobanteemitidoitems.Rentabilidad` se guarda al emitir con el
+  costo de ese momento (`ItemComprobante.cs:74`). Usarla en vez de
+  `Cantidad * PrecioCosto de hoy` elimina la distorsión por inflación que la
+  tarjeta advierte en pantalla. Solo se desvía si alguien usó "Recalcular
+  rentabilidad" en el ERP, que toma el costo actual.
+
+## 7.5 Rendimiento
+
+1. **Canasta:** en MariaDB un CTE referenciado varias veces se evalúa en cada
+   referencia, así que `ItemPairs` (el self-join caro) corre hasta 4 veces.
+   Traer `(idComprobante, idArticulo)` de los comprobantes válidos y contar pares
+   en pandas es mucho más barato, y en modo manual permite filtrar primero.
+2. **Doble cálculo por exportación** (7.3.10): caché por `(informe, parámetros)`
+   que cubra también los gráficos.
+3. **Informes en el hilo de la GUI** (pendiente de §2.3): `ReportWorker` con
+   barra de progreso y botones deshabilitados. Hoy `status_bar_message` llama a
+   `processEvents()` y se puede lanzar una segunda exportación en medio de la
+   primera.
+4. **Modal de artículos:** 20.000 `QListWidgetItem` armados con `iterrows()` y
+   filtrados de a uno. `QTableView` + `QSortFilterProxyModel` es instantáneo, y
+   la lista puede cargarse al abrir el modal, no al iniciar sesión.
+5. **Caché del panel roto** (7.3.4): 4 llamadas HTTP en cada arranque.
+6. Los índices de §4 siguen siendo lo que más impacta en bases grandes.
+
+## 7.6 Estadísticas nuevas (además de las de §3 que faltan)
+
+1. **Caja por medio de pago igual a la del ERP** (el arreglo de 7.2), con Mercado
+   Pago y Cuenta Corriente separados, y su evolución.
+2. **Comparativo contra el período anterior y el mismo período del año pasado**,
+   nominal y **real** (deflactado por IPC). La app ya baja el IPC pero se queda
+   con el último mes; guardar la serie completa alcanza.
+3. **Días de cobranza por cliente (DSO):** `FechaPago - FechaComprobante` en
+   cuenta corriente. Cuánto tarda en pagar cada cliente, no solo cuánto debe.
+4. **Presupuestos:** cantidad, monto y **tasa de conversión** (presupuesto que
+   terminó en venta al mismo cliente dentro de N días), y la lista de los
+   grandes sin convertir para llamar. Los datos ya están (`-84`).
+5. **Precios atrasados contra la inflación:** `FechaUltimaActualizacionPrecio` +
+   IPC acumulado desde esa fecha = "este precio perdió ~X% real". Con stock y
+   rotación, dice qué remarcar primero. La marcación correcta es la del ERP (con
+   `DescuentoProveedor`), no la de §3.6.
+6. **Quiebres de stock con venta perdida estimada:** artículos A/B con stock ≤ 0
+   × venta diaria.
+7. **Clientes nuevos y retención por mes** (cohortes por primera compra).
+8. **Ventas por punto de venta** (`puntosdeventa.Descripcion`).
+
+## 7.7 Mejoras visuales y de uso
+
+- **Vista previa dentro de la app:** el `MatplotlibWidget` ya existe y solo se
+  usa para exportar. Un botón "Ver" por tarjeta con el gráfico y la tabla
+  (`QTableView` sobre el DataFrame) evita exportar para mirar.
+- **Panel de control con contexto:** cada KPI con su variación contra el período
+  anterior (▲▼ %) y una mini-serie de 30 días. Sumar los KPIs escritos y no
+  mostrados (`get_kpi_slob_value`, `get_kpi_rfm_risk_count`) y "% de deuda con
+  más de 90 días".
+- **El ✏️ no dice "incluir en la exportación":** un lápiz se lee como "editar".
+  Un interruptor o check con leyenda.
+- **Un selector de período por pestaña** (o global) con rangos de negocio: este
+  mes, mes anterior, año en curso, 180/365 días y desde/hasta con calendario.
+- **Formato argentino** en gráficos y PDF: `$ 1.234.567` y meses en castellano.
+  Hoy sale `$1,234,567` y el eje dice `15-Sep`, sin año aunque el rango abarque
+  varios.
+- **Gráficos:** barras de un color de la marca (#312093) en vez de gris/azul
+  alternado; ventas diarias con los días sin venta en cero (hoy une el sábado
+  con el lunes), media móvil de 7 días y sin marcadores con cientos de puntos.
+- **PDF:** portada con empresa, fecha, período y resumen de KPIs; números de
+  página; tablas con números formateados y alineados a la derecha.
+- **Excel:** formato por **nombre de columna** en vez de por letra (arregla
+  7.3.6 a 7.3.8 de raíz), paneles inmovilizados, autofiltro y fila de totales.
+- **Después de exportar:** el cartel "¿Exportar otro / Cerrar el programa?"
+  cansa. Un aviso no bloqueante con "Abrir archivo" y "Abrir carpeta".
