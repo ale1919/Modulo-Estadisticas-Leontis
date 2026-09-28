@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget
 )
 
+from Recursos.Modulos import formatos
 from Recursos.Modulos.dashboard_manager import DashboardWorker
 from Recursos.Modulos.db_connection import AppLogic, DBManager
 from Recursos.Modulos.matplotlib_widget import MatplotlibWidget
@@ -1053,7 +1054,7 @@ class MainWindow(QMainWindow):
 
             # "Todos (sin gráfico)": el usuario pidió el listado completo, que va
             # al Excel. Un gráfico de barras con 4000 filas no se lee.
-            if ("top" in report_name or "cta_cte" in report_name) and limit == -1:
+            if limit == -1:
                 continue
 
             figure, _ = self.create_chart_image_in_memory(df, title, xlabel, ylabel, chart_type)
@@ -1132,10 +1133,12 @@ class MainWindow(QMainWindow):
         while True:
             try:
                 self.status_bar_message("Creando archivo Excel... Por favor, espere.", 0)
-                with pd.ExcelWriter(file_path, engine='xlsxwriter') as writer:
+                with pd.ExcelWriter(file_path, engine='xlsxwriter',
+                                    date_format='dd/mm/yyyy',
+                                    datetime_format='dd/mm/yyyy') as writer:
                     workbook = writer.book
                     header_format = workbook.add_format({'bold': True, 'valign': 'top', 'fg_color': '#D7E4BC', 'border': 1, 'text_wrap': True})
-                    currency_format = workbook.add_format({'num_format': '$#,##0.00'})
+                    currency_format = workbook.add_format({'num_format': '$ #,##0.00'})
                     date_format = workbook.add_format({'num_format': 'dd/mm/yyyy'})
 
                     title_format = workbook.add_format({
@@ -1161,6 +1164,14 @@ class MainWindow(QMainWindow):
                     })
                     
                     default_cell_format = workbook.add_format()
+
+                    formatos_xlsx = {
+                        formatos.MONEDA: currency_format,
+                        formatos.FECHA: date_format,
+                        formatos.PORCENTAJE: workbook.add_format({'num_format': '0.0" %"'}),
+                        formatos.ENTERO: workbook.add_format({'num_format': '#,##0'}),
+                        formatos.DECIMAL: workbook.add_format({'num_format': '#,##0.##'}),
+                    }
 
                     hojas_usadas = set()
 
@@ -1189,8 +1200,6 @@ class MainWindow(QMainWindow):
                             for col_num, value in enumerate(df_excel.columns.values):
                                 worksheet.write(1, col_num, value, header_format)
                             
-                            worksheet.autofit()
-
                             data_rows = len(df_excel)
                             if data_rows > 0:
                                 worksheet.conditional_format(
@@ -1201,19 +1210,13 @@ class MainWindow(QMainWindow):
                                         'format': zebra_format
                                     }
                                 )
-                            
-                            worksheet.autofit()
-                            
-                            if report_name in ["top_articles_value", "top_articles_qty"]:
-                                worksheet.set_column('C:E', 15, currency_format)
-                                worksheet.set_column('H:H', 18, currency_format)
-                            if report_name == "top_customers":
-                                 worksheet.set_column('C:D', 18, currency_format)
-                            if "sales" in report_name:
-                                 worksheet.set_column('A:A', 15, date_format)
-                                 worksheet.set_column('B:Z', 18, currency_format)
+
+                            # El formato sale del NOMBRE de cada columna, no de su
+                            # letra: antes, cada columna nueva corría los formatos y
+                            # el DNI salía con $ (AUDITORIA.md §7.3.6).
+                            self._formatear_columnas(worksheet, df_excel, formatos_xlsx)
+
                             if report_name == "market_basket":
-                                worksheet.set_column('C:E', 18, currency_format)
                                 worksheet.set_column('F:F', 70)
                                 worksheet.set_column('G:G', 15)
 
@@ -1251,59 +1254,22 @@ class MainWindow(QMainWindow):
                                             else:
                                                 worksheet.write_rich_string(fila + 2, target_col_idx, *segments_to_write)
 
-                            if report_name == "cta_cte":
-                                if 'Fecha' in df_excel.columns:
-                                    worksheet.set_column('A:A', 15, date_format)
-                                    worksheet.set_column('G:H', 18, currency_format)
-                                    worksheet.set_column('K:K', 18, currency_format)
-                                else:
-                                    worksheet.set_column('E:E', 18, currency_format)
+                            if report_name == "rfm_segmentation" and 'Segmento' in df_excel.columns:
+                                # Verde lo que hay que cuidar, rojo lo que se está yendo.
+                                col = list(df_excel.columns).index('Segmento')
+                                for segmento, formato in (("Campeones", seg_green_format),
+                                                          ("Leales", seg_green_format),
+                                                          ("En Riesgo", seg_red_format),
+                                                          ("Perdidos", seg_red_format)):
+                                    worksheet.conditional_format(
+                                        2, col, len(df_excel) + 1, col,
+                                        {'type': 'cell', 'criteria': '==',
+                                         'value': f'"{segmento}"', 'format': formato})
 
-                            if report_name == "rfm_segmentation":
-                                worksheet.set_column('D:D', 20)
-                                worksheet.set_column('E:E', 25)
-                                worksheet.set_column('F:F', 25, currency_format)
-
-                                data_rows = len(df_excel)
-                                if data_rows > 0:
-                                    data_range = (2, 10, data_rows + 1, 14)
-                                    
-                                    worksheet.conditional_format(data_range[0], data_range[1], data_range[2], data_range[3], {
-                                        'type': 'cell',
-                                        'criteria': '==',
-                                        'value': '"Si"',
-                                        'format': seg_green_format
-                                    })
-                                    
-                                    worksheet.conditional_format(data_range[0], data_range[1], data_range[2], data_range[3], {
-                                        'type': 'cell',
-                                        'criteria': '==',
-                                        'value': '"No"',
-                                        'format': seg_red_format
-                                    })
-
-                            if report_name == "slob_analysis":
-                                worksheet.set_column('E:E', 20, currency_format)
-
-                            if report_name == "margin_by_article":
-                                worksheet.set_column('D:F', 18, currency_format)
-
-                            if report_name == "abc_analysis":
-                                worksheet.set_column('F:F', 18, currency_format)
-                                worksheet.set_column('J:J', 20, currency_format)
-
-                            if report_name == "purchase_suggestion":
-                                worksheet.set_column('A:A', 28)
-                                worksheet.set_column('C:C', 35)
-                                worksheet.set_column('J:K', 18, currency_format)
-
-                            if report_name == "aging_cta_cte":
-                                worksheet.set_column('B:B', 30)
-                                worksheet.set_column('D:I', 16, currency_format)
-
-                            is_top_all_report = ("top" in report_name or "cta_cte" in report_name) and limit == -1
-
-                            if report_name not in self.REPORTES_SOLO_TABLA and not is_top_all_report:
+                            # "Todos (sin gráfico)" en cualquier informe con límite.
+                            # Antes solo se miraban los que tenían "top" en la clave
+                            # y el de margen igual intentaba dibujar miles de barras.
+                            if report_name not in self.REPORTES_SOLO_TABLA and limit != -1:
                                 figura, img_buffer = self.create_chart_image_in_memory(
                                     df_chart, title, xlabel, ylabel, chart_type)
                                 try:
@@ -1345,6 +1311,18 @@ class MainWindow(QMainWindow):
                 self.status_bar_message(f"Error al exportar a Excel: {e}", 7000)
                 QMessageBox.critical(self, "Error de Exportación", f"No se pudo guardar el archivo Excel:\n{e}")
                 break
+
+    @staticmethod
+    def _formatear_columnas(worksheet, df, formatos_xlsx):
+        """Ancho y formato de cada columna, según su nombre (`formatos.py`)."""
+        por_columna = formatos.formatos_por_columna(df.columns)
+        for i, nombre in enumerate(df.columns):
+            muestra = df.iloc[:200, i].astype(str).str.len()
+            ancho = max(len(str(nombre)) + 2, int(muestra.max() if len(muestra) else 0) + 2)
+            if por_columna.get(i) == formatos.MONEDA:
+                ancho += 4          # el "$ " y los separadores de miles
+            worksheet.set_column(i, i, min(max(ancho, 8), 60),
+                                 formatos_xlsx.get(por_columna.get(i)))
 
     @staticmethod
     def _nombre_de_hoja(titulo, usados):

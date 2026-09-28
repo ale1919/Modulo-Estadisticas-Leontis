@@ -1351,7 +1351,9 @@ y de los campos de pago mirando esta misma app; leyendo el ERP que los escribe,
 varias de esas deducciones resultan equivocadas.
 
 **Estado:** §7.1 y §7.2 aplicadas el 2026-09-25 (con `-81` como venta, confirmado
-por el usuario, y `-88` también, igual que la Caja Diaria del ERP). El resto,
+por el usuario, y `-88` también, igual que la Caja Diaria del ERP). §7.3.1 a
+§7.3.8 aplicadas en la tanda siguiente (7.3.6 a 7.3.8 de raíz, con
+`formatos.py`: el formato de Excel sale del nombre de la columna). El resto,
 pendiente.
 
 ## 7.1 🔴 Los tipos de comprobante están mal mapeados

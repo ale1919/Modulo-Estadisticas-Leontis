@@ -29,6 +29,27 @@ líneas propias. Antes casi todo figuraba como "Efectivo", "Tarjeta" daba cero y
 lo que decía "Otros" era en realidad la cuenta corriente. Si su Leontis no pide
 el medio de pago al facturar, lo cobrado en el momento figura como Efectivo.
 
+**"Últimos 30 días" son 30 días**, contando hoy. Antes traían uno de más: la
+opción "Últimas 24 horas" mostraba ayer y hoy (ahora se llama **Hoy**) y el
+sugerido de compra calculaba una venta diaria algo más alta que la real.
+
+**Segmentación de clientes (RFM) confiable.** Dos clientes con las mismas
+compras ahora reciben siempre el mismo puntaje (antes podía salir distinto por
+el orden en que venían). Cada cliente cae en un solo segmento, así que el
+gráfico suma exactamente la cantidad de clientes, y el Excel trae una columna
+**Segmento** coloreada en lugar de ocho columnas Verdadero/Falso. Las notas de
+crédito ya no cuentan como una compra más.
+
+**El Excel sale con el formato correcto en cada columna.** El DNI ya no aparece
+con signo `$`, las fechas no salen como moneda y los saldos llevan su formato.
+
+**El Panel de Control abre más rápido.** Las cotizaciones del dólar y el IPC se
+guardan por un día como estaba previsto; antes se volvían a pedir a internet en
+cada arranque.
+
+**"Todos (sin gráfico)" en Margen Bruto ya no intenta dibujar** un gráfico con
+miles de barras.
+
 ## 0.1.2 — 2026-08-14
 
 **El aviso de actualización ya no parpadea al abrir.** Al arrancar, la app chequea

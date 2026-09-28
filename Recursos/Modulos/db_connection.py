@@ -379,7 +379,9 @@ class AppLogic:
             return boton is not None and boton.isChecked()
 
         def texto_periodo(days):
-            return "Todo el Historial" if days == -1 else f"Últimos {days} días"
+            if days == -1:
+                return "Todo el Historial"
+            return "Hoy" if days == 1 else f"Últimos {days} días"
 
         def texto_limite(limit):
             return f"Top {limit}" if limit != -1 else "Todos los"

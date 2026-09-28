@@ -227,7 +227,7 @@ with BaseSintetica() as B:
             sum(v for v in por_cliente.values() if v > 0), "excel clientes: total")
 
     df_rfm, _ = sg.get_rfm_analysis_data(1, 7)
-    obtenido = dict(zip(df_rfm["RazonSocial"], df_rfm["Monetario"]))
+    obtenido = dict(zip(df_rfm["Cliente"], df_rfm["Monetario"]))
     for i, t in enumerate(tipos):
         esperado = por_cliente[100 + i]
         if esperado > 0:

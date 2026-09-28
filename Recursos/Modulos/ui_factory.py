@@ -73,7 +73,8 @@ class UIFactory:
         combo.addItem("Últimos 30 días", 30)
         combo.addItem("Últimos 15 días", 15)
         combo.addItem("Últimos 7 días", 7)
-        combo.addItem("Últimas 24 horas", 1)
+        # Es "hoy": la fecha del comprobante no tiene hora.
+        combo.addItem("Hoy", 1)
         combo.setCurrentIndex(1) 
         combo.setStyleSheet(MODERN_COMBOBOX_STYLE) 
         

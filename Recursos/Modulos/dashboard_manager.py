@@ -17,6 +17,20 @@ JSON_FILE_DOLAR = recurso("Recursos", "Datos", "dolares.json")
 JSON_FILE_INFLACION = recurso("Recursos", "Datos", "inflacion.json")
 
 
+def _como_numero(valor):
+    """float, o None si no es un número. Acepta lo que devuelve QSettings:
+    número, texto con punto decimal, None o basura."""
+    if isinstance(valor, bool):
+        return None
+    if isinstance(valor, (int, float)):
+        return float(valor) if valor == valor else None
+    try:
+        numero = float(str(valor).strip())
+    except (TypeError, ValueError):
+        return None
+    return numero if numero == numero and numero not in (float("inf"), float("-inf")) else None
+
+
 class ApiConnector:
     """Clase aislada para manejar todas las llamadas de red externas."""
     
@@ -182,7 +196,14 @@ class DashboardWorker(QObject):
 
             for key in keys_to_load:
                 cached_value = self.settings.value(f"{CACHE_PREFIX}{key}", None)
-                
+
+                # QSettings en el registro de Windows devuelve los float como
+                # texto ('1234.5'). Sin convertirlos, el isinstance de abajo
+                # fallaba siempre y el caché de 24 h no se usaba nunca: cada
+                # arranque volvía a consultar las cuatro APIs (AUDITORIA §7.3.4).
+                if key in numeric_keys:
+                    cached_value = _como_numero(cached_value)
+
                 if key in numeric_keys and not isinstance(cached_value, (int, float)):
                     _log.warning(f"La clave '{key}' no es un número válido (valor: {cached_value}).")
                     all_valid = False

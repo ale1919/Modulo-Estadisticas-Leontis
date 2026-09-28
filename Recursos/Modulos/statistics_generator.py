@@ -19,6 +19,7 @@ facturación y los presupuestos eran casi una tercera parte de lo que la app
 mostraba.
 """
 
+import numpy as np
 import pandas as pd
 from sqlalchemy import bindparam, text
 
@@ -115,8 +116,12 @@ class StatisticsGenerator:
 
         # `FechaComprobante` es DATE: comparar contra NOW() dejaría afuera el día
         # en curso a partir del mediodía. Se compara siempre contra fechas.
+        #
+        # "Últimos N días" son N días contando hoy: desde hoy - (N-1). Antes era
+        # `hoy - N`, que son N+1 días: "30 días" traía 31 y la venta diaria del
+        # sugerido de compra salía inflada (AUDITORIA.md §7.3.1).
         return (f" AND {prefijo}FechaComprobante >= "
-                f"DATE_SUB(CURDATE(), INTERVAL :{param_name} DAY)"
+                f"DATE_SUB(CURDATE(), INTERVAL (GREATEST(:{param_name}, 1) - 1) DAY)"
                 f" AND {prefijo}FechaComprobante <= CURDATE()")
 
     def _dias_efectivos(self, company_id, days):
@@ -130,7 +135,7 @@ class StatisticsGenerator:
             return max(int(days), 1)
 
         query = """
-            SELECT DATEDIFF(CURDATE(), MIN(FechaComprobante))
+            SELECT DATEDIFF(CURDATE(), MIN(FechaComprobante)) + 1
             FROM comprobanteemitido
             WHERE idEmpresa = :company_id AND Anulado = 0
         """
@@ -951,37 +956,64 @@ class StatisticsGenerator:
 
     @staticmethod
     def _quintil(serie, invertir=False):
-        """Puntaje 1-5 por quintiles, tolerante a pocos datos y a empates.
+        """Puntaje 1-5 por quintiles, con los empates en el MISMO puntaje.
 
-        `pd.qcut(..., 5, labels=[...])` levanta ValueError cuando se colapsan
-        bins, que es justo lo que pasa en una ferretería de barrio donde casi
-        todos los clientes compraron una sola vez. Se va bajando la cantidad de
-        grupos hasta que entre.
+        Antes se rankeaba con `method='first'`, que desempata por el orden de
+        las filas: dos clientes con una compra cada uno podían quedar con F=1 y
+        F=3 (AUDITORIA.md §7.3.2). En una ferretería donde la mayoría compró una
+        sola vez, eso volvía el RFM casi aleatorio. Ahora el puntaje sale del
+        percentil promedio, así que valores iguales dan puntajes iguales.
+
+        Sin al menos dos valores distintos no hay comparación posible y el
+        puntaje honesto es el del medio: si no, el único cliente de un comercio
+        chico quedaría marcado como "Perdido" o como "Campeón".
         """
-        etiquetas = [5, 4, 3, 2, 1] if invertir else [1, 2, 3, 4, 5]
-        rank = serie.rank(method='first')
-        # Se baja hasta 2 grupos, no hasta 1: con un solo grupo todos caerían en
-        # el extremo de la escala y el único cliente de una ferretería chica
-        # quedaría marcado como "Perdido". Sin al menos dos grupos no hay
-        # comparación posible y el puntaje honesto es el del medio.
-        for n in (5, 4, 3, 2):
-            try:
-                labs = etiquetas[-n:] if invertir else etiquetas[:n]
-                return pd.qcut(rank, n, labels=labs).astype(int)
-            except (ValueError, IndexError):
-                continue
-        return pd.Series(3, index=serie.index, dtype='int64')
+        numeros = pd.to_numeric(serie, errors='coerce')
+        if numeros.nunique(dropna=True) <= 1:
+            return pd.Series(3, index=serie.index, dtype='int64')
+        percentil = (-numeros if invertir else numeros).rank(method='average', pct=True)
+        puntaje = np.ceil(percentil * 5).clip(1, 5)
+        return puntaje.fillna(3).astype('int64')
+
+    # Segmentos en el orden en que se evalúan: el primero que cumple, gana. Así
+    # cada cliente cae en uno y solo uno. Antes eran ocho reglas sueltas que se
+    # superponían (Nuevos estaba dentro de Potenciales, Prometedores dentro de
+    # Leales) y dejaban huecos (R=3 con F=1 no caía en ninguno), así que el
+    # gráfico sumaba más clientes de los que había (AUDITORIA.md §7.3.3).
+    SEGMENTOS_RFM = (
+        ("Campeones", lambda r, f: r >= 4 and f >= 4),
+        ("Leales", lambda r, f: r >= 3 and f >= 3),
+        ("Nuevos", lambda r, f: r == 5 and f == 1),
+        ("Potenciales", lambda r, f: r >= 4),
+        ("Necesitan Atención", lambda r, f: r == 3),
+        ("En Riesgo", lambda r, f: f >= 3),
+        ("Perdidos", lambda r, f: True),
+    )
+
+    @classmethod
+    def _segmento(cls, r, f):
+        # La última regla es siempre verdadera: el bucle devuelve seguro.
+        for nombre, regla in cls.SEGMENTOS_RFM:
+            if regla(int(r), int(f)):
+                return nombre
 
     def get_rfm_analysis_data(self, company_id, days=-1):
-        """Segmentación por Recencia, Frecuencia y Monto."""
+        """Segmentación por Recencia, Frecuencia y Monto.
+
+        Frecuencia y recencia miran solo las COMPRAS: una nota de crédito no es
+        una visita más, ni hace que un cliente parezca reciente. El monto sí
+        las descuenta.
+        """
+        es_compra = f"ce.idTipoComprobante NOT IN {_lista_sql(TIPOS_NOTA_CREDITO)}"
         query = f"""
             SELECT
-                ce.idCliente,
-                cli.RazonSocial,
-                cli.Telefonos,
+                cli.RazonSocial AS Cliente,
+                cli.Telefonos AS 'Teléfono',
                 cli.Email,
-                DATEDIFF(CURDATE(), MAX(ce.FechaComprobante)) AS Recencia,
-                COUNT(DISTINCT ce.idComprobanteEmitido) AS Frecuencia,
+                DATEDIFF(CURDATE(), MAX(CASE WHEN {es_compra}
+                                            THEN ce.FechaComprobante END)) AS Recencia,
+                COUNT(DISTINCT CASE WHEN {es_compra}
+                                    THEN ce.idComprobanteEmitido END) AS Frecuencia,
                 SUM(ce.TotalOperacion * {SIGNO_VENTA('ce')}) AS Monetario
             FROM comprobanteemitido ce
             JOIN clientes cli ON ce.idCliente = cli.idCliente
@@ -990,43 +1022,29 @@ class StatisticsGenerator:
             {FILTRO_VENTA('ce')}
             {self._get_date_filter(days, 'ce')}
             GROUP BY ce.idCliente, cli.RazonSocial, cli.Telefonos, cli.Email
-            HAVING Monetario > 0;
+            HAVING Monetario > 0 AND Frecuencia > 0;
         """
         df_rfm = self.db_manager._execute_query(
             query, {"company_id": company_id, "days": days})
 
+        nombres = [n for n, _ in self.SEGMENTOS_RFM]
         if df_rfm.empty:
-            return pd.DataFrame(), pd.Series(dtype='int64')
+            return pd.DataFrame(), pd.Series(0, index=nombres, dtype='int64')
 
         df_rfm['R_Score'] = self._quintil(df_rfm['Recencia'], invertir=True)
         df_rfm['F_Score'] = self._quintil(df_rfm['Frecuencia'])
         df_rfm['M_Score'] = self._quintil(df_rfm['Monetario'])
+        df_rfm['Segmento'] = [self._segmento(r, f) for r, f
+                              in zip(df_rfm['R_Score'], df_rfm['F_Score'])]
 
-        df_rfm['RFM_Score_Text'] = (df_rfm['R_Score'].astype(str)
-                                    + df_rfm['F_Score'].astype(str)
-                                    + df_rfm['M_Score'].astype(str))
+        orden = {n: i for i, n in enumerate(nombres)}
+        df_rfm = (df_rfm.assign(_orden=df_rfm['Segmento'].map(orden))
+                        .sort_values(['_orden', 'Monetario'], ascending=[True, False])
+                        .drop(columns='_orden')
+                        .reset_index(drop=True))
 
-        df_rfm['SGM_Campeones'] = (df_rfm['R_Score'] >= 4) & (df_rfm['F_Score'] >= 4)
-        df_rfm['SGM_Leales'] = ((df_rfm['R_Score'] >= 3) & (df_rfm['F_Score'] >= 3)
-                                & ~df_rfm['SGM_Campeones'])
-        df_rfm['SGM_Potenciales'] = (df_rfm['R_Score'] >= 4) & (df_rfm['F_Score'] <= 2)
-        df_rfm['SGM_EnRiesgo'] = (df_rfm['R_Score'] <= 2) & (df_rfm['F_Score'] >= 3)
-        df_rfm['SGM_Perdidos'] = (df_rfm['R_Score'] <= 2) & (df_rfm['F_Score'] <= 2)
-        df_rfm['SGM_Nuevos'] = (df_rfm['R_Score'] == 5) & (df_rfm['F_Score'] == 1)
-        df_rfm['SGM_Prometedores'] = (df_rfm['R_Score'] >= 4) & (df_rfm['F_Score'] == 3)
-        df_rfm['SGM_NecesitanAtencion'] = (df_rfm['R_Score'] == 3) & (df_rfm['F_Score'] >= 2)
-
-        segment_counts = pd.Series({
-            'Campeones': df_rfm['SGM_Campeones'].sum(),
-            'Leales': df_rfm['SGM_Leales'].sum(),
-            'Potenciales': df_rfm['SGM_Potenciales'].sum(),
-            'En Riesgo': df_rfm['SGM_EnRiesgo'].sum(),
-            'Perdidos': df_rfm['SGM_Perdidos'].sum(),
-            'Nuevos': df_rfm['SGM_Nuevos'].sum(),
-            'Prometedores': df_rfm['SGM_Prometedores'].sum(),
-            'Necesitan Atención': df_rfm['SGM_NecesitanAtencion'].sum()
-        }, dtype='int64')
-
+        segment_counts = (df_rfm['Segmento'].value_counts()
+                          .reindex(nombres, fill_value=0).astype('int64'))
         return df_rfm, segment_counts
 
     # ------------------------------------------------------------------ #
@@ -1046,7 +1064,7 @@ class StatisticsGenerator:
             FROM comprobanteemitido
             WHERE idEmpresa = :company_id
             {FILTRO_VENTA('')}
-              AND FechaComprobante >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+              AND FechaComprobante >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)
               AND FechaComprobante <= CURDATE();
         """
         df = self.db_manager._execute_query(query, {"company_id": company_id})
@@ -1107,7 +1125,7 @@ class StatisticsGenerator:
             FROM comprobanteemitido
             WHERE idEmpresa = :company_id
             {FILTRO_VENTA('')}
-              AND FechaComprobante >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+              AND FechaComprobante >= DATE_SUB(CURDATE(), INTERVAL 29 DAY)
               AND FechaComprobante <= CURDATE();
         """
         df = self.db_manager._execute_query(query, {"company_id": company_id})

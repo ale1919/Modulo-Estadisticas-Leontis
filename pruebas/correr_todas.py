@@ -12,10 +12,15 @@ import sys
 import time
 from pathlib import Path
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except (AttributeError, ValueError):
+    pass
+
 ACA = Path(__file__).resolve().parent
 
 # Las que no tocan la base. Todo lo demás necesita el MariaDB local.
-RAPIDAS = {"test_formatos.py", "test_rfm.py", "test_periodos.py"}
+RAPIDAS = {"test_formatos.py", "test_rfm.py", "test_dashboard_cache.py"}
 
 
 def main():

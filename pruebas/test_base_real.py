@@ -87,7 +87,7 @@ for emp in elegidas:
                 f"empresa {emp}: los presupuestos no suman")
 
     ultimos30 = v[pd.to_datetime(v["FechaComprobante"]) >=
-                  pd.Timestamp(HOY) - pd.Timedelta(days=30)]
+                  pd.Timestamp(HOY) - pd.Timedelta(days=29)]
     C.igual(sg.get_kpi_total_sales_last_30_days(emp), float(ultimos30["importe"].sum()),
             f"empresa {emp}: KPI 30 días", tolerancia=0.05)
 
