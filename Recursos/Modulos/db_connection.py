@@ -1,5 +1,6 @@
 """Conexión a la base y orquestación de los informes."""
 
+import hmac
 import re
 import urllib.parse
 
@@ -198,6 +199,77 @@ class DBManager:
                  "WHERE Activa = 1 ORDER BY RazonSocial;")
         return self._execute_query(query)
 
+    # ------------------------------------------------------------------ #
+    # Roles de acceso — mismo criterio que Leontis
+    # ------------------------------------------------------------------ #
+    #
+    # En Leontis los roles son una preferencia DE LA EMPRESA, no del usuario:
+    # `empresaspreferencias.UsarRolesAcceso` (frmComitMINI.cs, CargarEmpresa).
+    # Si la empresa no tiene fila de preferencias, no usa roles
+    # (lgEmpresas.GetPreferencias devuelve una vacía). Con roles, se entra como
+    # usuario y el modo avanzado pide `empresas.PasswordAdministrador`,
+    # comparada sin espacios alrededor (frmClaveAdmin.cs).
+
+    # Errores de MySQL/MariaDB que dicen "esta base es de un Leontis anterior a
+    # los roles": tabla (1146) o columna (1054) inexistente.
+    _ERRORES_SIN_ROLES = ("1146", "1054", "doesn't exist", "unknown column")
+
+    def usa_roles_de_acceso(self, id_empresa):
+        """True si la empresa tiene los roles de acceso activados en Leontis.
+
+        Si la consulta falla por otra cosa (la red, la base caída), devuelve
+        True: ante la duda se entra con menos permisos, nunca con más. El
+        administrador siempre puede desbloquear con su contraseña.
+        """
+        df = self._execute_query(
+            "SELECT UsarRolesAcceso FROM empresaspreferencias WHERE idEmpresa = :id",
+            {"id": id_empresa})
+        if self.last_error:
+            error = self.last_error.lower()
+            if any(marca in error for marca in self._ERRORES_SIN_ROLES):
+                _log.info("La base no tiene roles de acceso (Leontis anterior).")
+                return False
+            _log.warning("No se pudo leer la preferencia de roles; se entra en modo usuario.")
+            return True
+        if df.empty:
+            return False
+        valor = df.iloc[0, 0]
+        try:
+            return bool(int(valor))
+        except (TypeError, ValueError):
+            return True
+
+    def verificar_clave_administrador(self, id_empresa, clave):
+        """(ok, motivo). `motivo` es el texto para el usuario cuando no es ok.
+
+        La contraseña de la base nunca sale de esta función ni va al log.
+        """
+        df = self._execute_query(
+            "SELECT PasswordAdministrador FROM empresas WHERE idEmpresa = :id",
+            {"id": id_empresa})
+        if self.last_error:
+            return False, "No se pudo verificar la contraseña: no hay conexión con la base."
+        if df.empty:
+            return False, "No se encontró la empresa en la base."
+
+        guardada = df.iloc[0, 0]
+        if guardada is None or not str(guardada).strip():
+            # En Leontis una contraseña vacía se "adivina" apretando Enter y una
+            # nula lo hace fallar. Acá ninguna de las dos desbloquea: que se
+            # configure en Leontis (ABM de Empresas).
+            return False, ("La empresa no tiene contraseña de administrador "
+                           "configurada en Leontis.")
+
+        ingresada = "" if clave is None else str(clave).strip()
+        # compare_digest con bytes: con str solo acepta ASCII, y hay
+        # contraseñas con ñ y acentos.
+        if hmac.compare_digest(ingresada.encode("utf-8"),
+                               str(guardada).strip().encode("utf-8")):
+            _log.info("Modo avanzado desbloqueado.")
+            return True, None
+        _log.info("Contraseña de administrador incorrecta.")
+        return False, "Contraseña incorrecta."
+
 
 class AppLogic:
     def __init__(self, main_window):
@@ -375,6 +447,11 @@ class AppLogic:
         all_report_data = []
 
         def activo(clave):
+            # En modo usuario las tarjetas restringidas solo se ocultaban, pero
+            # seguían tildadas: exportar las incluía igual, deudas y ventas
+            # incluidas. El permiso se mira acá, que es por donde pasa todo.
+            if not w.reporte_permitido(clave):
+                return False
             boton = w.report_buttons.get(clave)
             return boton is not None and boton.isChecked()
 

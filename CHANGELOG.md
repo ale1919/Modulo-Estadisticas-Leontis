@@ -12,6 +12,17 @@ error deja de aparecer, qué hay que hacer distinto.
 
 ## Sin publicar
 
+**Modo Usuario y Modo Avanzado, como en Leontis.** Si su empresa tiene activados
+los **roles de acceso** en Leontis, el programa abre en Modo Usuario: se ven el
+análisis de stock y las exportaciones de clientes y artículos. El botón
+**🔒 Modo Avanzado** del encabezado pide la **contraseña de administrador de
+Leontis** (la misma que usa Leontis) y habilita todos los informes y el Panel de
+Control; el mismo botón vuelve al Modo Usuario. Si su empresa no usa roles, el
+programa abre con todo habilitado, como siempre.
+
+Además, en Modo Usuario los informes ocultos ya no salen en las exportaciones:
+antes quedaban tildados y el Excel o el PDF los incluían igual.
+
 **Las ventas ahora cierran con las de Leontis.** Hasta esta versión la app:
 
 - **dejaba afuera toda la venta en comprobante X**, que en muchos comercios es

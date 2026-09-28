@@ -1340,6 +1340,33 @@ API, lo que hacen las otras es evidencia sobre lo que el servidor soporta.
 python -c "import requests; print(requests.post('https://sistema.leontis.com.ar:65081/login', json={}, timeout=10).status_code)"
 ```
 
+## Roles de acceso (2026-09-28) — reemplaza a §1.4
+
+§1.4 había sacado el "admin forzado para pruebas" y había puesto el rol según
+`isPermitirFacturaElectronicaProduccion`, un flag de la API de login que dice si
+el usuario puede facturar electrónicamente en producción: **no tiene nada que
+ver con los permisos**. Leontis implementó después los roles de verdad, y la app
+ahora usa su mismo criterio:
+
+- Es una preferencia **de la empresa**, no del usuario:
+  `empresaspreferencias.UsarRolesAcceso`. Sin fila de preferencias, no hay roles
+  (`lgEmpresas.GetPreferencias`).
+- Con roles se entra en **modo usuario** (stock y las dos exportaciones rápidas,
+  lo mismo que ya restringía la app). El botón del encabezado pide
+  `empresas.PasswordAdministrador`, comparada sin espacios alrededor, igual que
+  `frmClaveAdmin.cs`.
+- Diferencia a propósito con el ERP: una contraseña **vacía o nula** no
+  desbloquea. En Leontis la vacía se pasa apretando Enter y la nula hace fallar
+  el formulario; acá se avisa que hay que configurarla en Leontis.
+- Si la preferencia no se puede leer por un error que no sea "la tabla o la
+  columna no existe" (base de un Leontis anterior), se entra en modo usuario:
+  ante la duda, menos permisos.
+
+De paso apareció un agujero que venía de antes: en modo usuario las tarjetas se
+**ocultaban**, pero seguían tildadas, y exportar a Excel o PDF las incluía igual
+(ventas, deudas, márgenes). Ahora el permiso se mira en `generate_statistics`,
+que es por donde pasa toda exportación.
+
 ---
 
 # 7. Segunda auditoría (2026-09-25)

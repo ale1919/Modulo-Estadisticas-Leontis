@@ -13,7 +13,7 @@ from PySide6.QtCore import QSettings, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
-    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
+    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
     QMessageBox, QPushButton, QScrollArea, QStatusBar, QTabWidget, QTextBrowser,
     QVBoxLayout, QWidget
 )
@@ -44,7 +44,6 @@ class LoginDialog(QDialog):
         
         self.valid_db_manager = None
         self.valid_config_data = None
-        self.valid_user_role = None
         
         self.db_manager = DBManager()
         # HTTP, no HTTPS: el servidor NO habla TLS en este puerto. Un handshake
@@ -246,11 +245,8 @@ class LoginDialog(QDialog):
                         _log.error("No se pudo decodificar la cadena de conexión en Base64.")
                         return
 
-                # El rol sale de lo que dice la API. Antes esto estaba forzado a
-                # "admin" con un comentario de "para pruebas", así que todo usuario
-                # veía el Panel de Control y todos los informes.
-                is_admin = api_result.get("isPermitirFacturaElectronicaProduccion", False)
-                user_role_found = "admin" if is_admin else "usuario"
+                # El rol ya no sale de acá: lo decide la ventana principal con la
+                # preferencia de roles de la empresa en la base (ver MainWindow).
 
                 if not connection_string:
                     self.show_error("Error de API: La respuesta no contiene la 'cadenaConexion'.")
@@ -312,7 +308,6 @@ class LoginDialog(QDialog):
                     # 8. Guardar datos y aceptar
                     self.valid_db_manager = self.db_manager
                     self.valid_config_data = config_data
-                    self.valid_user_role = user_role_found
                     self.accept()
 
                 else:
@@ -547,6 +542,8 @@ class InstructionsDialog(QDialog):
         
         <h2>Conceptos Generales</h2>
         <ul>
+            <li><strong>Modo Usuario y Modo Avanzado:</strong> si su empresa tiene activados los <b>roles de acceso</b> en Leontis, el programa abre en <b>Modo Usuario</b>: solo se ven el análisis de stock y las exportaciones de clientes y artículos. El botón <b>Modo Avanzado</b> del encabezado pide la <b>contraseña de administrador de Leontis</b> y muestra todos los informes y el Panel de Control; el mismo botón vuelve al Modo Usuario. Si su empresa no usa roles de acceso, el programa abre directamente con todo habilitado.</li>
+
             <li><strong>Activación de Informes:</strong> Cada tarjeta de informe tiene un botón de lápiz (✏️) a la derecha del título. Si el botón está <b>activo (azul)</b>, el informe se incluirá en las exportaciones (PDF/Excel) de la barra inferior. Si está <b>inactivo (gris)</b>, se omitirá de esas exportaciones.</li>
             
             <li><strong>Memoria de Sesión:</strong> ¡El programa recuerda sus elecciones! El estado de cada botón de lápiz (activo/inactivo) y la selección de cada menú desplegable (Período, Límite, etc.) <b>se guardan automáticamente</b> al cerrar el programa y se restauran la próxima vez que inicia sesión.</li>
@@ -646,7 +643,7 @@ class MainWindow(QMainWindow):
     # único que efectivamente cruza de hilo.
     request_dashboard_load = Signal(bool)
 
-    def __init__(self, db_manager, config_data, user_role="usuario"):
+    def __init__(self, db_manager, config_data):
         super().__init__()
         self.setWindowTitle("Analizador de Estadísticas Leontis v4.2")
         self.resize(1100, 700)
@@ -668,7 +665,15 @@ class MainWindow(QMainWindow):
 
         self.db_manager = db_manager
         self.stats_generator = StatisticsGenerator(self.db_manager)
-        self.user_role = user_role
+
+        # Roles de acceso, con el mismo criterio que Leontis: si la EMPRESA los
+        # tiene activados se entra en modo usuario y el avanzado se desbloquea
+        # con la contraseña de administrador; si no, se entra como
+        # administrador. Antes el rol salía de un flag de la API de login que
+        # no tiene nada que ver (`isPermitirFacturaElectronicaProduccion`).
+        self.usa_roles = (self.db_manager.usa_roles_de_acceso(empresa_id)
+                          if empresa_id is not None else False)
+        self.user_role = "usuario" if self.usa_roles else "admin"
 
         # Cachea el detalle de cada informe mientras dura una exportación:
         # `generate_statistics()` y `get_detailed_data_for_report()` piden lo mismo
@@ -755,64 +760,87 @@ class MainWindow(QMainWindow):
                 return False
         return True
 
+    # Lo único que ve el modo usuario. Es lo que ya dejaba ver la app antes de
+    # los roles de Leontis: listados y stock, nada de ventas, márgenes ni deudas.
+    REPORTES_MODO_USUARIO = frozenset({"export_articles", "export_clients", "stock_analysis"})
+
+    def reporte_permitido(self, clave):
+        """Si el modo actual puede ver (y exportar) ese informe."""
+        return self.user_role == "admin" or clave in self.REPORTES_MODO_USUARIO
+
     def apply_role_restrictions(self):
+        """Aplica el modo: Panel de Control, tarjetas, pestañas y botón.
+
+        Funciona en los dos sentidos: se llama al abrir y cada vez que se
+        desbloquea o se vuelve a bloquear el modo avanzado.
+        """
+        es_admin = self.user_role == "admin"
+        _log.info("Modo %s.", "administrador" if es_admin else "usuario")
+
         admin_tab_index = self.main_tab_widget.indexOf(self.admin_dashboard_tab)
-
         if admin_tab_index != -1:
-            if self.user_role == "admin":
-                _log.info("Rol Admin: se muestra el Panel de Control.")
-                self.main_tab_widget.setTabVisible(admin_tab_index, True)
+            self.main_tab_widget.setTabVisible(admin_tab_index, es_admin)
+            if es_admin:
                 self.setup_dashboard()
-            else:
-                _log.info("Rol Usuario: se oculta el Panel de Control.")
-                self.main_tab_widget.setTabVisible(admin_tab_index, False)
-        else:
-            _log.warning("No se encontró la pestaña 'admin_dashboard_tab'.")
-            
-        if self.user_role == "admin":
-            _log.debug("Sesión de Administrador: sin restricciones de informes.")
-            return
 
-        _log.debug("Sesión de Usuario: aplicando restricciones de rol.")
-        
-        allowed_reports = {
-            "export_articles",
-            "export_clients",
-            "stock_analysis"
-        }
+        self._aplicar_visibilidad_por_rol()
 
+    def _aplicar_visibilidad_por_rol(self):
+        """Tarjetas, grupos de inactivos, pestañas y botón según el modo.
+
+        Aparte de `apply_role_restrictions` porque también la llama
+        `handle_report_toggle`: al mover una tarjeta de layout Qt la re-parenta
+        y puede volver a mostrarla, y eso pasa DESPUÉS de abrir la ventana (lo
+        dispara `load_settings` con un temporizador).
+        """
+        es_admin = self.user_role == "admin"
         for key, config in self.report_widget_config.items():
-            if key not in allowed_reports:
-                try:
-                    report_card_widget = config.get("widget")
-                    if report_card_widget:
-                        report_card_widget.setVisible(False)
-
-                except Exception as e:
-                    _log.warning("No se pudo restringir la tarjeta '%s': %s", key, e)
+            tarjeta = config.get("widget")
+            if tarjeta is not None:
+                tarjeta.setVisible(self.reporte_permitido(key))
 
         for inactive_group, inactive_layout in self.inactive_reports_map.values():
-            if self._is_layout_visibly_empty(inactive_layout):
-                inactive_group.setVisible(False)
+            inactive_group.setVisible(not self._is_layout_visibly_empty(inactive_layout))
 
-        tab_has_visible_content = {}
-        for tab_key in self.report_tabs.keys():
-            tab_has_visible_content[tab_key] = False
+        for tab_key, tab_widget in self.report_tabs.items():
+            visible = es_admin or any(
+                cfg["tab_key"] == tab_key and self.reporte_permitido(k)
+                for k, cfg in self.report_widget_config.items())
+            index = self.main_tab_widget.indexOf(tab_widget)
+            if index != -1:
+                # Si es la pestaña actual, Qt pasa sola a una visible.
+                self.main_tab_widget.setTabVisible(index, visible)
 
-        for report_key in allowed_reports:
-            if report_key in self.report_widget_config:
-                tab_key = self.report_widget_config[report_key]["tab_key"]
-                if tab_key in tab_has_visible_content:
-                    tab_has_visible_content[tab_key] = True
-        
-        for tab_key, has_content in tab_has_visible_content.items():
-            if not has_content:
-                tab_widget_to_hide = self.report_tabs.get(tab_key)
-                if tab_widget_to_hide:
-                    index = self.main_tab_widget.indexOf(tab_widget_to_hide)
-                    if index != -1:
-                        self.main_tab_widget.setTabVisible(index, False)
+        self.modo_avanzado_btn.setVisible(self.usa_roles)
+        self.modo_avanzado_btn.setText("\U0001F513 Volver a Modo Usuario" if es_admin
+                                       else "\U0001F512 Modo Avanzado")
+        self.modo_avanzado_btn.setToolTip(
+            "Ocultar los informes de administrador" if es_admin else
+            "Ver todos los informes. Pide la contraseña de administrador de Leontis.")
 
+    def alternar_modo_avanzado(self):
+        """El botón del encabezado: desbloquea con contraseña o vuelve a bloquear."""
+        if self.user_role == "admin":
+            self.user_role = "usuario"
+            self.apply_role_restrictions()
+            self.status_bar_message("Modo usuario.", 3000)
+            return
+
+        clave, aceptado = QInputDialog.getText(
+            self, "Modo Avanzado",
+            "Contraseña de administrador de Leontis:", QLineEdit.EchoMode.Password)
+        if not aceptado:
+            return
+
+        ok, motivo = self.db_manager.verificar_clave_administrador(
+            self.logic.selected_empresa_id, clave)
+        if not ok:
+            QMessageBox.warning(self, "Modo Avanzado", motivo or "Contraseña incorrecta.")
+            return
+
+        self.user_role = "admin"
+        self.apply_role_restrictions()
+        self.status_bar_message("Modo avanzado: se muestran todos los informes.", 4000)
 
     def init_ui(self):
         main_widget = QWidget()
@@ -1444,6 +1472,8 @@ class MainWindow(QMainWindow):
         if tab_key == "articulos":
             self.reflow_articles_grid()
 
+        self._aplicar_visibilidad_por_rol()
+
     def reflow_articles_grid(self):
         grid = self.active_reports_grid_map["articulos"]
         
@@ -1493,6 +1523,7 @@ class MainWindow(QMainWindow):
         self.export_articles_excel_btn.clicked.connect(self.export_quick_articles_excel)
         
         self.instructions_btn.clicked.connect(self.show_instructions_modal)
+        self.modo_avanzado_btn.clicked.connect(self.alternar_modo_avanzado)
         
     def on_basket_mode_changed(self):
         mode = self.basket_mode_combo.currentData()
@@ -1725,7 +1756,6 @@ def main():
         window = MainWindow(
             db_manager=login_dialog.valid_db_manager,
             config_data=login_dialog.valid_config_data,
-            user_role=login_dialog.valid_user_role,
         )
     except Exception:
         # Sin esto, en el .exe compilado (sin consola) un error al construir la

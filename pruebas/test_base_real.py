@@ -92,5 +92,16 @@ for emp in elegidas:
             f"empresa {emp}: KPI 30 días", tolerancia=0.05)
 
 C.check(db.last_error is None, f"ninguna consulta falló ({db.last_error})")
+
+# Roles de acceso: la preferencia de cada empresa, tal como la dejó el ERP.
+with engine.connect() as c:
+    roles = pd.read_sql(text("""
+        SELECT e.idEmpresa, COALESCE(p.UsarRolesAcceso, 0) AS usa
+        FROM empresas e LEFT JOIN empresaspreferencias p ON p.idEmpresa = e.idEmpresa"""), c)
+C.check(len(roles) > 0 and roles["usa"].sum() > 0, "hay empresas con y sin roles en la copia")
+for fila in roles.itertuples():
+    C.igual(db.usa_roles_de_acceso(int(fila.idEmpresa)), bool(fila.usa),
+            f"empresa {fila.idEmpresa}: roles de acceso")
+
 engine.dispose()
 C.cerrar()

@@ -23,6 +23,7 @@ A-3). La conexión sale de `C:\leontis-prueba\cliente.cnf` o de la variable
 | `test_rfm_base.py` | sintética | Frecuencia y recencia sin notas de crédito, un segmento por cliente, conteos que suman el total, empresa sin ventas |
 | `test_rfm.py` | ninguna (rápida) | Puntaje por quintiles: empates iguales, monótono, 1 a 5, 300 series al azar con semilla fija; los 25 casos de R×F contra una tabla a mano |
 | `test_formatos.py` | ninguna (rápida) | El formato de Excel de TODAS las columnas que devuelven los informes, por nombre; formato argentino de pesos y números |
+| `test_roles.py` | sintética + ventana real sin pantalla | La preferencia de roles en cada estado (activada, no, sin fila, base sin la tabla o la columna, base caída); el dominio de la contraseña de administrador; qué se ve y qué se exporta en cada modo, desbloquear, cancelar, clave mala, volver a bloquear |
 | `test_dashboard_cache.py` | ninguna (rápida), QSettings real | El caché de 24 h del panel con lo que de verdad devuelve el registro de Windows (los `float` vuelven como texto) |
 
 La base sintética se arma con el DDL de `PROYECTOS 8-10/SCHEMAS/LEONTIS schema.sql`.
@@ -52,3 +53,15 @@ Tanda 2 (2026-09-28):
   final, que ya atrapan `startswith` y `endswith`.
 - `_quintil` / `_segmento`: los que quedan son `clip(1, 5)` → `clip(1, 6)`
   (el percentil nunca pasa de 1, así que el puntaje nunca pasa de 5).
+
+Roles (2026-09-28), con `test_roles.py`:
+
+- `main.py`, `_aplicar_visibilidad_por_rol`: **14 de 17**. Quedan los dos
+  tooltips del botón y la guarda `indexOf(...) != -1` (las pestañas existen
+  siempre). En `alternar_modo_avanzado` y `apply_role_restrictions` sobreviven
+  solo textos de carteles, mensajes de la barra de estado con sus milisegundos
+  y el log.
+- Se sacó un bloque que buscaba "la primera pestaña visible" al ocultar la
+  actual: la medición mostró que era código muerto, Qt ya lo hace solo al
+  llamar a `setTabVisible(actual, False)`. La prueba lo sigue mirando.
+- `db_connection.py`: los mensajes de log.

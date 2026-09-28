@@ -56,7 +56,13 @@ class UIFactory:
         layout.addWidget(self.main_window.empresa_label)
         
         layout.addStretch()
-        
+
+        # Solo se ve si la empresa usa roles de acceso en Leontis.
+        self.main_window.modo_avanzado_btn = QPushButton("🔒 Modo Avanzado")
+        self.main_window.modo_avanzado_btn.setStyleSheet(HEADER_HELP_BUTTON_STYLE)
+        self.main_window.modo_avanzado_btn.setVisible(False)
+        layout.addWidget(self.main_window.modo_avanzado_btn)
+
         self.main_window.instructions_btn = QPushButton("? Instrucciones")
         self.main_window.instructions_btn.setStyleSheet(HEADER_HELP_BUTTON_STYLE)
         self.main_window.instructions_btn.setToolTip("Abrir el manual de instrucciones del analizador")
