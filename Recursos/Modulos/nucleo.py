@@ -65,8 +65,10 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -96,6 +98,17 @@ NOMBRE_INSTALADO = "instalado.json"
 # Corto a propósito: si el FTP no está, nadie tiene que esperar para entrar.
 TIMEOUT_FTP = 12
 TIMEOUT_FTP_SUBIDA = 120
+
+# El chequeo de arranque (¿hay versión nueva?) lee UN manifiesto de unos KB: medido
+# 0,3-0,7 s. Con 12 s, un FTP que acepta la conexión y se queda mudo (medido
+# 2026-10-01: 12,0 s) hacía perder esos 12 s en CADA arranque, de cada app.
+TIMEOUT_FTP_CHEQUEO = 6
+
+# Cuánto se espera, como máximo, para saber si el FTP está al otro lado antes de
+# buscar actualizaciones. Tiene que ser MENOR que `MS_ANTES_DE_MOSTRAR` de
+# ui_updater (2,5 s): así, con el FTP caído, el diálogo ni llega a aparecer
+# (el arranque no parpadea, que fue lo que se arregló en la 1.3.3).
+TIMEOUT_SONDA_FTP = 2
 
 # Bajar objetos es otra cosa que leer un manifiesto. Son cientos de MB en miles
 # de archivos y el timeout se mide entre bloques: con 12 segundos alcanza con un
@@ -252,11 +265,61 @@ class ActualizacionCancelada(Exception):
     """El usuario canceló mientras se bajaba la actualización."""
 
 
-def obtener_manifiesto(app):
+def obtener_manifiesto(app, timeout=TIMEOUT_FTP):
     """Conveniencia para la autoactualización de una app: abre su propia
     conexión, lee su manifiesto y cierra."""
-    with Sesion() as s:
+    with Sesion(timeout=timeout) as s:
         return s.manifiesto(app)
+
+
+def ftp_responde(segundos=TIMEOUT_SONDA_FTP, host=None, puerto=21):
+    """¿Acepta el servidor FTP una conexión TCP? No entra ni pide nada.
+
+    Se usa antes del chequeo de arranque: con el FTP caído, `Sesion()` espera
+    `TIMEOUT_FTP` (12 s) en cada arranque de cada app, y durante ese rato el único
+    botón del diálogo era «Cancelar y salir». Medido el 2026-10-01 contra un
+    agujero negro y contra un servidor que acepta y no dice nada: 12,0 s los dos.
+
+    **El plazo es TOTAL**, no por dirección ni por paso. `socket.create_connection`
+    aplica el timeout a cada dirección que resuelve el nombre (un host con IPv4 +
+    IPv6 tardó 18 s con un tope de 4), y la resolución del nombre en sí no tiene
+    timeout: sin DNS puede tardar más que eso. Por eso todo va en un hilo aparte
+    del que se espera lo que dice `segundos`, y si no terminó se da por caído. El
+    hilo es *daemon*: si queda colgado no impide cerrar el programa.
+
+    Devuelve False ante cualquier duda (sin red, nombre que no resuelve, puerto
+    cerrado, plazo vencido). Un falso «caído» solo hace saltear UN chequeo de
+    actualización —la app abre igual con la versión que tiene, que es lo que ya
+    pasaba con cualquier error del FTP—, así que ante la duda se prefiere no esperar.
+    """
+    host = host or FTP_CONFIG["host"]
+    contesto = []
+
+    def _probar():
+        try:
+            limite = time.monotonic() + segundos
+            for familia, tipo, proto, _, direccion in socket.getaddrinfo(
+                    host, puerto, type=socket.SOCK_STREAM):
+                restante = limite - time.monotonic()
+                if restante <= 0:
+                    return
+                s = socket.socket(familia, tipo, proto)
+                try:
+                    s.settimeout(restante)
+                    s.connect(direccion)
+                    contesto.append(True)
+                    return
+                except OSError:
+                    continue
+                finally:
+                    s.close()
+        except Exception:
+            return
+
+    hilo = threading.Thread(target=_probar, name="sonda-ftp", daemon=True)
+    hilo.start()
+    hilo.join(segundos + 0.25)
+    return bool(contesto)
 
 
 # ==========================================

@@ -71,8 +71,16 @@ class HiloAutoActualizacion(QThread):
     def run(self):
         try:
             self.estado.emit("Buscando actualizaciones…")
+            # Con el FTP caído no se espera: antes cada arranque perdía 12 s acá, con
+            # el diálogo en pantalla y «Cancelar y salir» como único botón. La sonda
+            # tarda como mucho `TIMEOUT_SONDA_FTP`, menos de lo que tarda en aparecer
+            # el diálogo. Es lo mismo que cualquier otro fallo del FTP: se sigue.
+            if not nucleo.ftp_responde():
+                self.resultado.emit("sin-red", "el servidor FTP no responde")
+                return
             try:
-                manifiesto = nucleo.obtener_manifiesto(APP_NAME)
+                manifiesto = nucleo.obtener_manifiesto(
+                    APP_NAME, timeout=nucleo.TIMEOUT_FTP_CHEQUEO)
             except Exception as e:
                 # FTP caído, sin red, todavía no se publicó, firma inválida:
                 # nada de esto justifica frenar el arranque.
