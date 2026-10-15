@@ -1,5 +1,49 @@
 # CLAUDE.md — Módulo de Estadísticas
 
+<!-- COMUN:INICIO -->
+## Antes de nada: la documentación común
+
+> **Lo primero de esta sesión: abrí `../../DOCUMENTACION/ARRANQUE-DE-SESION.md`
+> y seguilo.** Antes de leer código y antes de planificar nada. Dice cómo se
+> arranca; **no está copiado acá a propósito** —vive en un solo lugar para que no
+> haya diecisiete versiones distintas—, pero abrirlo no es opcional.
+
+El resto de las reglas que valen para **todos** los proyectos están en
+`../../DOCUMENTACION`. Empezá por su **`LEEME.md`**, que dice qué leer
+según lo que vayas a hacer.
+
+| Documento | Cuándo |
+|---|---|
+| `DOCUMENTACION/PERMISOS.md` | Qué se hace sin preguntar y qué requiere aprobación |
+| `DOCUMENTACION/HERRAMIENTAS.md` | **Antes de abrir código**: los índices contestan sin leer archivos |
+| `DOCUMENTACION/PRUEBAS.md` | Antes de escribir o tocar una prueba |
+| `DOCUMENTACION/ARRANQUE-DE-SESION.md` | Al empezar. No es opcional |
+| `DOCUMENTACION/CIERRE-DE-SESION.md` | Al terminar. No es opcional |
+| `DOCUMENTACION/REGLA-DE-ORO.md` | Si el código puede llegar a un cliente |
+
+Lo mínimo que hay que saber sin abrirlas:
+
+- **Leer nunca se pregunta.** Cualquier archivo, de cualquier tipo. Y el permiso
+  se pide **una vez por tarea, no una vez por paso**.
+- **Preguntale al índice antes de abrir código**:
+  `python HERRAMIENTAS/preguntar.py donde <nombre>` / `usa <nombre>` / `doc "texto"`.
+- **No audites leyendo: escribí las pruebas**, y que barran el dominio de cada
+  dato (bien, vacío, mal formado, muy largo, muy corto) contra cada preferencia.
+  Escribirlas al cerrar es obligatorio; **correrlas se le ofrece al usuario, no
+  se lanza sola**. Las baterías solo crecen (hay un trinquete).
+- **Antes de tocar código, el plan.** Clasificar el esfuerzo de cada tarea,
+  elegir modelo y esfuerzo, decidir qué se delega a un subagente, y mostrarlo
+  todo junto: **un solo permiso para la sesión entera**.
+- **Se corre lo que el cambio toca, no todo**:
+  `python HERRAMIENTAS/correr_todo.py --proyecto <el tuyo> --tocados --plan`
+  dice qué pruebas cubren lo cambiado y qué quedó sin ninguna.
+- **Una herramienta que sirva más allá de esta sesión va a `HERRAMIENTAS/`**,
+  con su `README.md`. Antes de escribir una, buscala: puede que ya exista.
+
+> Este bloque lo genera `HERRAMIENTAS/repartir_bloque.py`. Editá **abajo** de los
+> marcadores: lo de acá adentro se pisa en la próxima corrida.
+<!-- COMUN:FIN -->
+
 <!-- MINIHUB:INICIO -->
 ## ⚠️ Antes de tocar esta app: leé `ACTUALIZACIONES.md`
 
